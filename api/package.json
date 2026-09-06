@@ -1,0 +1,38 @@
+{
+  "name": "api",
+  "version": "1.0.0",
+  "description": "MobileLens REST API",
+  "main": "dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build":   "tsc",
+    "dev":     "tsx watch src/index.ts",
+    "start":   "node dist/index.js",
+    "migrate": "drizzle-kit migrate",
+    "generate":"drizzle-kit generate"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "22.20.1",
+    "drizzle-kit": "0.31.10",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.1",
+    "better-auth": "1.7.2",
+    "better-sqlite3": "12.11.1",
+    "drizzle-orm": "0.45.2",
+    "hono": "4.13.7",
+    "minio": "8.0.7"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.18.20": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  }
+}
