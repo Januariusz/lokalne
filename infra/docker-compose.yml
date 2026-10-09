@@ -1,19 +1,24 @@
+# Lokalny backend MobileLens - bez domeny, certyfikatów i pliku .env.
+#
+#   cd infra
+#   docker compose -f docker-compose.local.yml up -d --build
+#   cd .. && bash admin.sh            # konta testowe + marki + telefony
+#
+# API i pliki (/media) są pod:  http://localhost:8080
+# Frontend na innym porcie/hoście? Dopisz go:  ALLOWED_ORIGINS=http://localhost:3000 docker compose -f docker-compose.local.yml up -d
+# Reset do zera:  docker compose -f docker-compose.local.yml down -v
+name: mobilelens-local
+
 services:
 
   caddy:
     image: caddy:2
     restart: unless-stopped
-    mem_limit: 96m
     ports:
-      - "80:80"
-      - "443:443"
+      - "8080:80"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro,z
       - media-data:/srv/media:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    networks:
-      - internal
     depends_on:
       api:
         condition: service_healthy
@@ -24,37 +29,31 @@ services:
       dockerfile: Dockerfile
       target: builder
     restart: "no"
-    env_file:
-      - ../.env
     environment:
       - DATABASE_PATH=/app/data/db.sqlite
     volumes:
       - sqlite-data:/app/data
     command: ["npx", "drizzle-kit", "migrate"]
-    networks:
-      - internal
 
   api:
     build:
       context: ../api
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Limity dobrane pod VPS z 1 GiB RAM (Standard B2ats v2). Upload jest strumieniowy,
-    # więc API nie wczytuje plików do pamięci; pliki tymczasowe i docelowe lądują na dysku
-    # (wolumen media-data, ten sam, który Caddy serwuje pod /media/*).
-    mem_limit: 384m
-    env_file:
-      - ../.env
     environment:
-      - NODE_ENV=production
-      - NODE_OPTIONS=--max-old-space-size=192
+      - NODE_ENV=development
+      - PORT=3000
       - DATABASE_PATH=/app/data/db.sqlite
       - STORAGE_DIR=/app/storage
+      - BETTER_AUTH_SECRET=local-dev-secret-local-dev-secret-local-dev-secret-1234
+      - API_BASE_URL=http://localhost:8080
+      - PUBLIC_MEDIA_URL=http://localhost:8080/media
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://localhost:3000,http://localhost:4173}
+      - EMAIL_VERIFICATION=false
+      - AUTO_AGGREGATION=false
     volumes:
       - sqlite-data:/app/data
       - media-data:/app/storage
-    networks:
-      - internal
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -62,9 +61,3 @@ services:
 volumes:
   sqlite-data:
   media-data:
-  caddy-data:
-  caddy-config:
-
-networks:
-  internal:
-    driver: bridge
