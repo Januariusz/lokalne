@@ -6,3 +6,7 @@ export { uploadRouter } from "./upload.js";
 export { reviewsRouter } from "./reviews.js";
 export { favoritesRouter } from "./favorites.js";
 export { adminRouter } from "./admin.js";
+export { accountRouter } from "./account.js";
+export { notificationsRouter } from "./notifications.js";
+export { statsRouter } from "./stats.js";
+export { mediaRouter } from "./media.js";

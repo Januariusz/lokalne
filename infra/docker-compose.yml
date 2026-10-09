@@ -3,11 +3,13 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    mem_limit: 96m
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - media-data:/srv/media:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
@@ -37,68 +39,29 @@ services:
       context: ../api
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Limity dobrane pod VPS z 1 GiB RAM (Standard B2ats v2). Upload jest strumieniowy,
+    # więc API nie wczytuje plików do pamięci; pliki tymczasowe i docelowe lądują na dysku
+    # (wolumen media-data, ten sam, który Caddy serwuje pod /media/*).
+    mem_limit: 384m
     env_file:
       - ../.env
     environment:
       - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=192
       - DATABASE_PATH=/app/data/db.sqlite
-      - MINIO_ENDPOINT=minio
-      - MINIO_PORT=9000
+      - STORAGE_DIR=/app/storage
     volumes:
       - sqlite-data:/app/data
+      - media-data:/app/storage
     networks:
       - internal
     depends_on:
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
 
-  minio:
-    image: minio/minio:latest
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    env_file:
-      - ../.env
-    volumes:
-      - minio-data:/data
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  minio-init:
-    image: minio/mc:latest
-    restart: "no"
-    env_file:
-      - ../.env
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
-        mc mb --ignore-existing local/photos;
-        mc mb --ignore-existing local/videos;
-        mc mb --ignore-existing local/review-media;
-        mc mb --ignore-existing local/device-images;
-        mc anonymous set download local/photos;
-        mc anonymous set download local/videos;
-        mc anonymous set download local/review-media;
-        mc anonymous set download local/device-images;
-        exit 0;
-      "
-    networks:
-      - internal
-    depends_on:
-      minio:
-        condition: service_healthy
-
 volumes:
   sqlite-data:
-  minio-data:
+  media-data:
   caddy-data:
   caddy-config:
 

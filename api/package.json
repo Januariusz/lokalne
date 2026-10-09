@@ -8,15 +8,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "build":   "tsc",
-    "dev":     "tsx watch src/index.ts",
-    "start":   "node dist/index.js",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
     "migrate": "drizzle-kit migrate",
-    "generate":"drizzle-kit generate"
+    "generate": "drizzle-kit generate"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
+    "@types/busboy": "1.5.4",
     "@types/node": "22.20.1",
+    "@types/nodemailer": "8.0.2",
     "drizzle-kit": "0.31.10",
     "tsx": "4.23.13",
     "typescript": "7.0.2"
@@ -25,9 +27,10 @@
     "@hono/node-server": "2.1.1",
     "better-auth": "1.7.2",
     "better-sqlite3": "12.11.1",
+    "busboy": "1.6.0",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.7",
-    "minio": "8.0.7"
+    "nodemailer": "10.0.10"
   },
   "allowScripts": {
     "better-sqlite3@12.11.1": true,
