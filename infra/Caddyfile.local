@@ -1,0 +1,17 @@
+:80 {
+    request_body {
+        max_size 350MB
+    }
+
+    handle_path /media/* {
+        root * /srv/media/files
+        header Cache-Control "no-cache"
+        header X-Content-Type-Options "nosniff"
+        header Content-Security-Policy "default-src 'none'"
+        file_server
+    }
+
+    handle {
+        reverse_proxy api:3000
+    }
+}
