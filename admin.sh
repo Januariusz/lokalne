@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MobileLens - zasilenie świeżej bazy: konta (admin, moderator, reviewer, user) + marki i telefony.
 #
-#   bash admin.sh          tryb LOCAL (domyślny): backend z infra/docker-compose.local.yml, http://localhost:8080
+#   bash admin.sh          tryb LOCAL (domyślny): backend z infra/docker-compose.local.yml (albo docker-compose.yml w repo lokalnym), http://localhost:8080
 #   bash admin.sh prod     tryb PROD: serwer produkcyjny (VPS), https://mobilelens.duckdns.org
 #
 # Uruchamiaj z katalogu projektu (tam, gdzie leży infra/), po wcześniejszym `docker compose ... up -d --build`.
@@ -17,7 +17,9 @@ MODE="${1:-local}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="${COMPOSE_DIR:-$([ -f "$SCRIPT_DIR/infra/docker-compose.yml" ] && echo "$SCRIPT_DIR/infra" || echo "$SCRIPT_DIR")}"
 case "$MODE" in
-  local) API_URL="${API_URL:-http://localhost:8080}"; COMPOSE_FILES=(-f docker-compose.local.yml) ;;
+  local) API_URL="${API_URL:-http://localhost:8080}"
+         # repo z osobnym plikiem lokalnym używa docker-compose.local.yml; w repo "lokalne" lokalny jest docker-compose.yml
+         if [ -f "$COMPOSE_DIR/docker-compose.local.yml" ]; then COMPOSE_FILES=(-f docker-compose.local.yml); else COMPOSE_FILES=(); fi ;;
   prod)  API_URL="${API_URL:-https://mobilelens.duckdns.org}"; COMPOSE_FILES=() ;;
   *)     echo "Użycie: bash admin.sh [local|prod]" >&2; exit 2 ;;
 esac
