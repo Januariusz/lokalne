@@ -41,6 +41,8 @@ const PL: Record<string, string> = {
   INVALID_STATUS:           "Nieprawidłowy status",
   STATUS_NOT_ALLOWED:       "Nie możesz ustawić tego statusu",
   MISSING_FIELDS:           "Brakuje wymaganych pól",
+  BRAND_NOT_FOUND:          "Nie znaleziono marki",
+  PHONE_LIMIT_REACHED:      "Osiągnięto dzienny limit dodawania nowych telefonów",
   NAME_REQUIRED:            "Nazwa jest wymagana",
   NOTHING_TO_UPDATE:        "Brak danych do aktualizacji",
   SMARTPHONE_ID_REQUIRED:   "Parametr smartphone_id jest wymagany",

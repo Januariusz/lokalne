@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db } from "../db/index.js";
 import { smartphone, camera, cameraVideoMode, brand, photo, video } from "../db/schema.js";
 import { eq, and, or, like, sql, desc, asc, gte, lte, exists, type SQL } from "drizzle-orm";
-import { requireRole } from "../middleware/requireAuth.js";
+import { requireRole, requireAuth, hasRole } from "../middleware/requireAuth.js";
 import { publicUrl } from "../lib/storage.js";
 import { fail } from "../lib/errors.js";
 import type { HonoVariables } from "../types/honoTypes.js";
@@ -315,35 +315,86 @@ smartphonesRouter.post("/:id/view", async (c) => {
 });
 
 
-// Dodawanie wpisów do katalogu ("Add device") jest uprawnieniem moderatora.
-smartphonesRouter.post("/", requireRole("moderator"), async (c) => {
+// Dodawanie telefonu do katalogu.
+//  - zwykły użytkownik (BPMN 2.4: "My phone" -> "Submit camera data"): zakłada wpis NIEZWERYFIKOWANY
+//    (verifiedBy = null); moderator potwierdza go później przez PATCH /:id,
+//  - moderator/administrator ("Add device"): wpis od razu zweryfikowany.
+// Marka: brandId albo brandName (marka jest dopasowywana bez względu na wielkość liter, a gdy jej
+// nie ma - tworzona; aplikacja mobilna zna tylko napis z Build.MANUFACTURER).
+// Ten sam model tej samej marki nie zostanie zdublowany: API zwraca istniejący wpis (200, existing:true).
+const NEW_PHONES_PER_DAY = 10; // limit dla kont poniżej moderatora (ochrona przed zaśmiecaniem katalogu)
+
+smartphonesRouter.post("/", requireAuth, async (c) => {
   const user = c.get("user");
+  const isStaff = hasRole(user.role, "moderator");
 
   const body = await c.req.json<{
-    brandId: string;
-    modelName: string;
-    imageUrl?: string;
-    releaseDate?: string;
-  }>();
+    brandId?: unknown; brandName?: unknown; modelName?: unknown; imageUrl?: unknown; releaseDate?: unknown;
+  }>().catch(() => null);
+  if (!body) return fail(c, 400, "INVALID_BODY", "Request body must be valid JSON");
 
-  if (!body.brandId || !body.modelName) {
-    return fail(c, 400, "MISSING_FIELDS", "brandId and modelName are required");
+  const modelName = typeof body.modelName === "string" ? body.modelName.trim() : "";
+  const brandName = typeof body.brandName === "string" ? body.brandName.trim() : "";
+  const brandIdIn = typeof body.brandId === "string" ? body.brandId : "";
+  if (!modelName || (!brandIdIn && !brandName)) {
+    return fail(c, 400, "MISSING_FIELDS", "modelName and brandId (or brandName) are required");
+  }
+  if (modelName.length > 128 || brandName.length > 128) {
+    return fail(c, 400, "INVALID_FIELD", "modelName and brandName can be at most 128 characters", { field: modelName.length > 128 ? "modelName" : "brandName" });
+  }
+  if (body.releaseDate !== undefined && body.releaseDate !== null &&
+      (typeof body.releaseDate !== "string" || !/^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.releaseDate))) {
+    return fail(c, 400, "INVALID_FIELD", "releaseDate must be YYYY, YYYY-MM or YYYY-MM-DD", { field: "releaseDate" });
+  }
+  // zdjęcie urządzenia może ustawić tylko moderator (upload /device-image jest dla moderatora)
+  const imageUrl = isStaff && typeof body.imageUrl === "string" ? body.imageUrl : null;
+
+  // marka
+  let brandId = brandIdIn;
+  if (brandId) {
+    const b = await db.select({ id: brand.id }).from(brand).where(eq(brand.id, brandId));
+    if (!b[0]) return fail(c, 404, "BRAND_NOT_FOUND", "Brand not found");
+  } else {
+    const found = await db.select({ id: brand.id }).from(brand)
+      .where(sql`lower(${brand.name}) = ${brandName.toLowerCase()}`);
+    if (found[0]) {
+      brandId = found[0].id;
+    } else {
+      brandId = randomUUID();
+      await db.insert(brand).values({ id: brandId, name: brandName, logoUrl: null });
+    }
+  }
+
+  // duplikat: ta sama marka + ten sam model (bez względu na wielkość liter)
+  const dup = (await db.select().from(smartphone).where(and(
+    eq(smartphone.brandId, brandId),
+    sql`lower(${smartphone.modelName}) = ${modelName.toLowerCase()}`,
+  )))[0];
+  if (dup) return c.json({ ...dup, imageUrl: publicUrl(dup.imageUrl), verified: dup.verifiedBy !== null, existing: true }, 200);
+
+  if (!isStaff) {
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    const n = (await db.select({ n: sql<number>`count(*)` }).from(smartphone)
+      .where(and(eq(smartphone.addedBy, user.id), gte(smartphone.createdAt, since))))[0]?.n ?? 0;
+    if (n >= NEW_PHONES_PER_DAY) {
+      return fail(c, 429, "PHONE_LIMIT_REACHED", `You can add at most ${NEW_PHONES_PER_DAY} new phones per day`);
+    }
   }
 
   const newPhone = {
     id:          randomUUID(),
-    brandId:     body.brandId,
+    brandId,
     addedBy:     user.id,
-    verifiedBy:  null as string | null,
-    modelName:   body.modelName.trim(),
-    imageUrl:    body.imageUrl ?? null,
-    releaseDate: body.releaseDate ?? null,
+    verifiedBy:  (isStaff ? user.id : null) as string | null,
+    modelName,
+    imageUrl,
+    releaseDate: (body.releaseDate as string | null | undefined) ?? null,
     viewCount:   0,
     createdAt:   new Date(),
   };
 
   await db.insert(smartphone).values(newPhone);
-  return c.json(newPhone, 201);
+  return c.json({ ...newPhone, verified: newPhone.verifiedBy !== null, existing: false }, 201);
 });
 
 
