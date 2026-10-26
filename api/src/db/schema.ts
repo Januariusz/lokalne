@@ -117,6 +117,12 @@ export const camera = sqliteTable("camera", {
   apertureNarrow: real("aperture_narrow"),            // największa liczba f (najbardziej przymknięta przysłona)
   opticalZoom: integer("optical_zoom", { mode: "boolean" }).notNull().default(false),
   focalLengthMaxMm: real("focal_length_max_mm"),      // koniec zakresu zoomu (focal_length_mm = początek)
+  // Dodatkowe dane matrycy i zdjęcia (wszystkie opcjonalne).
+  sensorFormat: text("sensor_format", { length: 16 }), // rozmiar matrycy bez znaku cala, np. "1/1.28" albo "1"
+  photoWidthPx: integer("photo_width_px"),            // maksymalne wymiary zdjęcia, dłuższy bok jako szerokość
+  photoHeightPx: integer("photo_height_px"),
+  aspectRatio: text("aspect_ratio", { length: 16 }),  // proporcje matrycy, np. "4:3", "1:1"
+  note: text("note", { length: 500 }),                // notatka moderatora o nietypowym aparacie (przypis pod specyfikacją)
 }, (t) => [
   index("idx_camera_smartphone").on(t.smartphoneId),
   index("idx_camera_submitter").on(t.submitterId),

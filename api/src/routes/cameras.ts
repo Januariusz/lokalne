@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db } from "../db/index.js";
 import { camera, cameraVideoMode, smartphone } from "../db/schema.js";
 import { eq, and, desc } from "drizzle-orm";
-import { requireAuth, requireRole } from "../middleware/requireAuth.js";
+import { requireAuth, requireRole, hasRole } from "../middleware/requireAuth.js";
 import { fail } from "../lib/errors.js";
 import { notify } from "../lib/notifications.js";
 import { validateCameraSpec, validateVideoModes, sampleCoverage } from "../lib/cameraSpec.js";
@@ -14,6 +14,7 @@ const camerasRouter = new Hono<{ Variables: HonoVariables }>();
 const SPEC_KEYS = [
   "type", "facing", "focalLengthMm", "aperture", "cropFactor", "pixelPitchUm", "resolutionMp",
   "activeResolutionMp", "afZones", "ois", "variableAperture", "apertureNarrow", "opticalZoom", "focalLengthMaxMm",
+  "sensorFormat", "photoWidthPx", "photoHeightPx", "aspectRatio", "note",
 ] as const;
 
 async function withSamples<T extends { id: string; variableAperture: boolean; opticalZoom: boolean }>(row: T) {
@@ -63,6 +64,8 @@ camerasRouter.post("/", requireAuth, async (c) => {
   // Walidacja danych (BPMN 2.4: "Data validation"): niepoprawne zgłoszenie nie trafia do bazy.
   const spec = validateCameraSpec(body);
   if (!spec.ok) return fail(c, 400, "INVALID_FIELD", spec.message, { field: spec.field });
+  // Notatkę pod specyfikacją ustawia tylko moderator; od zwykłego użytkownika jest pomijana.
+  if (!hasRole(user.role, "moderator")) spec.data.note = null;
   const modes = validateVideoModes(body["videoModes"]);
   if (!modes.ok) return fail(c, 400, "INVALID_FIELD", modes.message, { field: modes.field });
 

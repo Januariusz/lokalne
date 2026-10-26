@@ -21,7 +21,27 @@ export type CameraSpec = {
   apertureNarrow: number | null;
   opticalZoom: boolean;
   focalLengthMaxMm: number | null;
+  sensorFormat: string | null;
+  photoWidthPx: number | null;
+  photoHeightPx: number | null;
+  aspectRatio: string | null;
+  note: string | null;
 };
+
+// Rozmiar matrycy bez znaku cala: "1/1.28", "1/2.55", "1" albo "1.5".
+const SENSOR_FORMAT_RE = /^(1\/\d+(\.\d+)?|\d+(\.\d+)?)$/;
+// Proporcje matrycy: "4:3", "3:2", "1:1", "16:9" (dopuszczalne też części dziesiętne, np. "1.91:1").
+const ASPECT_RATIO_RE = /^\d+(\.\d+)?:\d+(\.\d+)?$/;
+const NOTE_MAX = 500;
+const PHOTO_PX_MAX = 30000;
+
+/** Pole tekstowe opcjonalne: brak / null / "" => null; inaczej string po trim(). */
+function optText(v: unknown): { ok: true; value: string | null } | { ok: false } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "string") return { ok: false };
+  const t = v.trim();
+  return { ok: true, value: t === "" ? null : t };
+}
 
 export type VideoModeInput = { widthPx: number; heightPx: number; fpsMax: number; note: string | null };
 
@@ -94,6 +114,46 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
     }
   }
 
+  // ── pola dodatkowe (opcjonalne) ──
+  const sf = optText(input["sensorFormat"]);
+  if (!sf.ok || (sf.value !== null && (sf.value.length > 16 || !SENSOR_FORMAT_RE.test(sf.value)))) {
+    return bad("sensorFormat", 'sensorFormat must look like "1/1.28" or "1" (no inch sign)');
+  }
+  if (sf.value !== null && Number(sf.value.split("/").pop()) <= 0) {
+    return bad("sensorFormat", "sensorFormat must be greater than 0");
+  }
+
+  const px = (key: "photoWidthPx" | "photoHeightPx"): number | null | Invalid => {
+    const v = input[key];
+    if (v === undefined || v === null) return null;
+    const n = num(v);
+    if (n === null || !Number.isInteger(n) || n < 1 || n > PHOTO_PX_MAX) {
+      return bad(key, `${key} must be an integer between 1 and ${PHOTO_PX_MAX}`);
+    }
+    return n;
+  };
+  let photoWidthPx = px("photoWidthPx");
+  if (photoWidthPx !== null && typeof photoWidthPx === "object") return photoWidthPx;
+  let photoHeightPx = px("photoHeightPx");
+  if (photoHeightPx !== null && typeof photoHeightPx === "object") return photoHeightPx;
+  // Dłuższy bok zawsze jako szerokość: zdjęcie w pionie (np. 3000x4000) zamieniamy na 4000x3000.
+  if (photoWidthPx !== null && photoHeightPx !== null && photoHeightPx > photoWidthPx) {
+    [photoWidthPx, photoHeightPx] = [photoHeightPx, photoWidthPx];
+  }
+
+  const ar = optText(input["aspectRatio"]);
+  if (!ar.ok || (ar.value !== null && (ar.value.length > 16 || !ASPECT_RATIO_RE.test(ar.value)))) {
+    return bad("aspectRatio", 'aspectRatio must look like "4:3", "3:2" or "1:1"');
+  }
+  if (ar.value !== null && ar.value.split(":").some((p) => Number(p) <= 0)) {
+    return bad("aspectRatio", "aspectRatio parts must be greater than 0");
+  }
+
+  const nt = optText(input["note"]);
+  if (!nt.ok || (nt.value !== null && nt.value.length > NOTE_MAX)) {
+    return bad("note", `note must be a string of at most ${NOTE_MAX} characters`);
+  }
+
   return {
     ok: true,
     data: {
@@ -111,6 +171,11 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
       apertureNarrow,
       opticalZoom,
       focalLengthMaxMm,
+      sensorFormat: sf.value,
+      photoWidthPx,
+      photoHeightPx,
+      aspectRatio: ar.value,
+      note: nt.value,
     },
   };
 }

@@ -216,7 +216,7 @@ async function computeStats() {
   return {
     visitsLast24h:          await count(visitLog, gte(visitLog.visitedAt, day)),
     visitsLastWeek:         await count(visitLog, gte(visitLog.visitedAt, week)),
-    activeUsers,                                                   // użytkownicy z sesją w ostatnich 30 dniach
+    activeUsers,
     registrationsLast30Days: await count(user, and(gte(user.createdAt, month), eq(user.isDeletedUser, false))),
     activeBans:             await count(userBan, and(isNull(userBan.revokedAt), or(isNull(userBan.expiresAt), gt(userBan.expiresAt, new Date())))),
     totalBans:              await count(userBan),
@@ -230,10 +230,6 @@ async function computeStats() {
 
 adminRouter.get("/stats", async (c) => c.json(await computeStats()));
 
-/**
- * Wszystko, czego potrzebuje ekran "Content management" + "Engagement statistics":
- * 5 najnowszych recenzji do weryfikacji, ostatnie blokady i ukryte recenzje (tylko administrator) oraz statystyki.
- */
 adminRouter.get("/dashboard", async (c) => {
   const actingUser = c.get("user");
   const isAdmin = hasRole(actingUser.role, "admin");

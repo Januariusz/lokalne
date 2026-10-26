@@ -15,6 +15,13 @@
       "when": 1791560020174,
       "tag": "0001_new_features",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793042603533,
+      "tag": "0002_camera_extra_fields",
+      "breakpoints": true
     }
   ]
 }
