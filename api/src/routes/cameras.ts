@@ -6,6 +6,7 @@ import { requireAuth, requireRole, hasRole } from "../middleware/requireAuth.js"
 import { fail } from "../lib/errors.js";
 import { notify } from "../lib/notifications.js";
 import { validateCameraSpec, validateVideoModes, sampleCoverage } from "../lib/cameraSpec.js";
+import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
 
@@ -164,6 +165,19 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
     cameraId: id, smartphoneId: existing.smartphoneId, status,
   });
   return c.json({ ok: true });
+});
+
+/**
+ * Usunięcie aparatu (obiektywu) przez moderatora, np. błędnego albo zdublowanego wpisu.
+ * Razem z aparatem znikają jego tryby wideo, zdjęcia i filmy (wiersze w bazie i pliki z dysku).
+ */
+camerasRouter.delete("/:id", requireRole("moderator"), async (c) => {
+  const id = c.req.param("id") as string;
+  const existing = (await db.select({ id: camera.id }).from(camera).where(eq(camera.id, id)))[0];
+  if (!existing) return fail(c, 404, "CAMERA_NOT_FOUND", "Camera not found");
+
+  const removed = await deleteCamerasWithMedia([id]);
+  return c.json({ ok: true, deletedPhotos: removed.photos, deletedVideos: removed.videos });
 });
 
 export { camerasRouter };

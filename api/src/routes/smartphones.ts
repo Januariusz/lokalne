@@ -4,6 +4,7 @@ import { smartphone, camera, cameraVideoMode, brand, photo, video } from "../db/
 import { eq, and, or, like, sql, desc, asc, gte, lte, exists, type SQL } from "drizzle-orm";
 import { requireRole, requireAuth, hasRole } from "../middleware/requireAuth.js";
 import { publicUrl } from "../lib/storage.js";
+import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
 import { fail } from "../lib/errors.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
@@ -43,20 +44,20 @@ function paging(c: { req: { query(name: string): string | undefined } }) {
 
 async function getSmartphoneDetail(id: string) {
   const rows = await db
-  .select({
-    phone:        smartphone,
-    brandName:    brand.name,
-    brandLogoUrl: brand.logoUrl,
-  })
-  .from(smartphone)
-  .leftJoin(brand, eq(smartphone.brandId, brand.id))
-  .where(eq(smartphone.id, id));
+    .select({
+      phone:        smartphone,
+      brandName:    brand.name,
+      brandLogoUrl: brand.logoUrl,
+    })
+    .from(smartphone)
+    .leftJoin(brand, eq(smartphone.brandId, brand.id))
+    .where(eq(smartphone.id, id));
 
   const row = rows[0];
   if (!row) return null;
 
   const cameras = await db.select().from(camera)
-  .where(and(eq(camera.smartphoneId, id), eq(camera.status, "approved")));
+    .where(and(eq(camera.smartphoneId, id), eq(camera.status, "approved")));
 
   const camerasWithModes = await Promise.all(cameras.map(async (cam) => {
     const modes = await db.select().from(cameraVideoMode).where(eq(cameraVideoMode.cameraId, cam.id));
@@ -184,7 +185,7 @@ smartphonesRouter.get("/", async (c) => {
   if (camConds.length > 0) {
     conds.push(exists(
       db.select({ one: sql`1` }).from(camera)
-      .where(and(eq(camera.smartphoneId, smartphone.id), eq(camera.status, "approved"), ...camConds)),
+        .where(and(eq(camera.smartphoneId, smartphone.id), eq(camera.status, "approved"), ...camConds)),
     ));
   }
 
@@ -192,34 +193,34 @@ smartphonesRouter.get("/", async (c) => {
 
   // Stabilna kolejność (drugi klucz + id), żeby paginacja nie gubiła ani nie dublowała rekordów.
   const orderBy =
-  sort === "trending" ? [desc(smartphone.viewCount), desc(smartphone.createdAt), asc(smartphone.id)]
+    sort === "trending" ? [desc(smartphone.viewCount), desc(smartphone.createdAt), asc(smartphone.id)]
   : sort === "new"      ? [desc(smartphone.releaseDate), desc(smartphone.createdAt), asc(smartphone.id)]
   :                       [asc(smartphone.modelName), asc(smartphone.id)];
 
   const rows = await db
-  .select({
-    id:          smartphone.id,
-    modelName:   smartphone.modelName,
-    imageUrl:    smartphone.imageUrl,
-    releaseDate: smartphone.releaseDate,
-    viewCount:   smartphone.viewCount,
-    brandId:     smartphone.brandId,
-    brandName:   brand.name,
-    verifiedBy:  smartphone.verifiedBy,
-    createdAt:   smartphone.createdAt,
-  })
-  .from(smartphone)
-  .leftJoin(brand, eq(smartphone.brandId, brand.id))
-  .where(where)
-  .orderBy(...orderBy)
-  .limit(limit)
-  .offset(offset);
+    .select({
+      id:          smartphone.id,
+      modelName:   smartphone.modelName,
+      imageUrl:    smartphone.imageUrl,
+      releaseDate: smartphone.releaseDate,
+      viewCount:   smartphone.viewCount,
+      brandId:     smartphone.brandId,
+      brandName:   brand.name,
+      verifiedBy:  smartphone.verifiedBy,
+      createdAt:   smartphone.createdAt,
+    })
+    .from(smartphone)
+    .leftJoin(brand, eq(smartphone.brandId, brand.id))
+    .where(where)
+    .orderBy(...orderBy)
+    .limit(limit)
+    .offset(offset);
 
   const totalRows = await db
-  .select({ n: sql<number>`count(*)` })
-  .from(smartphone)
-  .leftJoin(brand, eq(smartphone.brandId, brand.id))
-  .where(where);
+    .select({ n: sql<number>`count(*)` })
+    .from(smartphone)
+    .leftJoin(brand, eq(smartphone.brandId, brand.id))
+    .where(where);
 
   const data = rows.map(({ verifiedBy, ...r }) => ({ ...r, verified: verifiedBy !== null, imageUrl: publicUrl(r.imageUrl) }));
   return c.json({ data, page, limit, total: totalRows[0]?.n ?? 0, sort });
@@ -241,27 +242,27 @@ smartphonesRouter.get("/:id/photos", async (c) => {
   const { page, limit, offset } = paging(c);
 
   const rows = await db
-  .select({
-    id:         photo.id,
-    cameraId:   photo.cameraId,
-    cameraType: camera.type,
-    facing:     camera.facing,
-    storageUrl: photo.storageUrl,
-    widthPx:    photo.widthPx,
-    heightPx:   photo.heightPx,
-    uploadDate: photo.uploadDate,
-  })
-  .from(photo)
-  .innerJoin(camera, eq(photo.cameraId, camera.id))
-  .where(and(eq(camera.smartphoneId, id), eq(photo.status, "verified")))
-  .orderBy(desc(photo.uploadDate), asc(photo.id))
-  .limit(limit)
-  .offset(offset);
+    .select({
+      id:         photo.id,
+      cameraId:   photo.cameraId,
+      cameraType: camera.type,
+      facing:     camera.facing,
+      storageUrl: photo.storageUrl,
+      widthPx:    photo.widthPx,
+      heightPx:   photo.heightPx,
+      uploadDate: photo.uploadDate,
+    })
+    .from(photo)
+    .innerJoin(camera, eq(photo.cameraId, camera.id))
+    .where(and(eq(camera.smartphoneId, id), eq(photo.status, "verified")))
+    .orderBy(desc(photo.uploadDate), asc(photo.id))
+    .limit(limit)
+    .offset(offset);
 
   return c.json({
     data: rows.map(({ storageUrl, ...r }) => ({ ...r, url: publicUrl(storageUrl) })),
-                page,
-                limit,
+    page,
+    limit,
   });
 });
 
@@ -271,28 +272,28 @@ smartphonesRouter.get("/:id/videos", async (c) => {
   const { page, limit, offset } = paging(c);
 
   const rows = await db
-  .select({
-    id:         video.id,
-    cameraId:   video.cameraId,
-    cameraType: camera.type,
-    facing:     camera.facing,
-    storageUrl: video.storageUrl,
-    widthPx:    video.widthPx,
-    heightPx:   video.heightPx,
-    fps:        video.fps,
-    uploadDate: video.uploadDate,
-  })
-  .from(video)
-  .innerJoin(camera, eq(video.cameraId, camera.id))
-  .where(and(eq(camera.smartphoneId, id), eq(video.status, "verified")))
-  .orderBy(desc(video.uploadDate), asc(video.id))
-  .limit(limit)
-  .offset(offset);
+    .select({
+      id:         video.id,
+      cameraId:   video.cameraId,
+      cameraType: camera.type,
+      facing:     camera.facing,
+      storageUrl: video.storageUrl,
+      widthPx:    video.widthPx,
+      heightPx:   video.heightPx,
+      fps:        video.fps,
+      uploadDate: video.uploadDate,
+    })
+    .from(video)
+    .innerJoin(camera, eq(video.cameraId, camera.id))
+    .where(and(eq(camera.smartphoneId, id), eq(video.status, "verified")))
+    .orderBy(desc(video.uploadDate), asc(video.id))
+    .limit(limit)
+    .offset(offset);
 
   return c.json({
     data: rows.map(({ storageUrl, ...r }) => ({ ...r, url: publicUrl(storageUrl) })),
-                page,
-                limit,
+    page,
+    limit,
   });
 });
 
@@ -311,9 +312,9 @@ smartphonesRouter.post("/:id/view", async (c) => {
   }
 
   const updated = await db.update(smartphone)
-  .set({ viewCount: sql`${smartphone.viewCount} + 1` })
-  .where(eq(smartphone.id, id))
-  .returning({ id: smartphone.id });
+    .set({ viewCount: sql`${smartphone.viewCount} + 1` })
+    .where(eq(smartphone.id, id))
+    .returning({ id: smartphone.id });
 
   if (!updated[0]) return fail(c, 404, "NOT_FOUND", "Not found");
 
@@ -350,11 +351,11 @@ smartphonesRouter.post("/", requireAuth, async (c) => {
     return fail(c, 400, "INVALID_FIELD", "modelName and brandName can be at most 128 characters", { field: modelName.length > 128 ? "modelName" : "brandName" });
   }
   if (body.releaseDate !== undefined && body.releaseDate !== null &&
-    (typeof body.releaseDate !== "string" || !/^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.releaseDate))) {
+      (typeof body.releaseDate !== "string" || !/^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.releaseDate))) {
     return fail(c, 400, "INVALID_FIELD", "releaseDate must be YYYY, YYYY-MM or YYYY-MM-DD", { field: "releaseDate" });
-    }
-    // zdjęcie urządzenia może ustawić tylko moderator (upload /device-image jest dla moderatora)
-    const imageUrl = isStaff && typeof body.imageUrl === "string" ? body.imageUrl : null;
+  }
+  // zdjęcie urządzenia może ustawić tylko moderator (upload /device-image jest dla moderatora)
+  const imageUrl = isStaff && typeof body.imageUrl === "string" ? body.imageUrl : null;
 
   // marka
   let brandId = brandIdIn;
@@ -363,7 +364,7 @@ smartphonesRouter.post("/", requireAuth, async (c) => {
     if (!b[0]) return fail(c, 404, "BRAND_NOT_FOUND", "Brand not found");
   } else {
     const found = await db.select({ id: brand.id }).from(brand)
-    .where(sql`lower(${brand.name}) = ${brandName.toLowerCase()}`);
+      .where(sql`lower(${brand.name}) = ${brandName.toLowerCase()}`);
     if (found[0]) {
       brandId = found[0].id;
     } else {
@@ -375,14 +376,14 @@ smartphonesRouter.post("/", requireAuth, async (c) => {
   // duplikat: ta sama marka + ten sam model (bez względu na wielkość liter)
   const dup = (await db.select().from(smartphone).where(and(
     eq(smartphone.brandId, brandId),
-                                                            sql`lower(${smartphone.modelName}) = ${modelName.toLowerCase()}`,
+    sql`lower(${smartphone.modelName}) = ${modelName.toLowerCase()}`,
   )))[0];
   if (dup) return c.json({ ...dup, imageUrl: publicUrl(dup.imageUrl), verified: dup.verifiedBy !== null, existing: true }, 200);
 
   if (!isStaff) {
     const since = new Date(Date.now() - 24 * 3600 * 1000);
     const n = (await db.select({ n: sql<number>`count(*)` }).from(smartphone)
-    .where(and(eq(smartphone.addedBy, user.id), gte(smartphone.createdAt, since))))[0]?.n ?? 0;
+      .where(and(eq(smartphone.addedBy, user.id), gte(smartphone.createdAt, since))))[0]?.n ?? 0;
     if (n >= NEW_PHONES_PER_DAY) {
       return fail(c, 429, "PHONE_LIMIT_REACHED", `You can add at most ${NEW_PHONES_PER_DAY} new phones per day`);
     }
@@ -390,14 +391,14 @@ smartphonesRouter.post("/", requireAuth, async (c) => {
 
   const newPhone = {
     id:          randomUUID(),
-                       brandId,
-                       addedBy:     user.id,
-                       verifiedBy:  (isStaff ? user.id : null) as string | null,
-                       modelName,
-                       imageUrl,
-                       releaseDate: (body.releaseDate as string | null | undefined) ?? null,
-                       viewCount:   0,
-                       createdAt:   new Date(),
+    brandId,
+    addedBy:     user.id,
+    verifiedBy:  (isStaff ? user.id : null) as string | null,
+    modelName,
+    imageUrl,
+    releaseDate: (body.releaseDate as string | null | undefined) ?? null,
+    viewCount:   0,
+    createdAt:   new Date(),
   };
 
   await db.insert(smartphone).values(newPhone);
@@ -428,8 +429,17 @@ smartphonesRouter.patch("/:id", requireRole("moderator"), async (c) => {
 });
 
 
+// Usunięcie telefonu razem z jego aparatami, zdjęciami i filmami (zdjęcia i filmy blokowały
+// wcześniej usunięcie, bo ich klucz obcy do aparatu ma ON DELETE RESTRICT).
 smartphonesRouter.delete("/:id", requireRole("admin"), async (c) => {
-  await db.delete(smartphone).where(eq(smartphone.id, c.req.param("id") as string));
+  const id = c.req.param("id") as string;
+  const phone = (await db.select({ id: smartphone.id }).from(smartphone).where(eq(smartphone.id, id)))[0];
+  if (!phone) return fail(c, 404, "SMARTPHONE_NOT_FOUND", "Smartphone not found");
+
+  const cameraIds = (await db.select({ id: camera.id }).from(camera).where(eq(camera.smartphoneId, id)))
+    .map((r) => r.id);
+  await deleteCamerasWithMedia(cameraIds);
+  await db.delete(smartphone).where(eq(smartphone.id, id));
   return c.json({ ok: true });
 });
 
