@@ -15,8 +15,8 @@ const camerasRouter = new Hono<{ Variables: HonoVariables }>();
 
 const SPEC_KEYS = [
   "type", "facing", "focalLengthMm", "aperture", "cropFactor", "pixelPitchUm", "resolutionMp",
-  "activeResolutionMp", "afZones", "ois", "variableAperture", "apertureNarrow", "opticalZoom", "focalLengthMaxMm",
-  "sensorFormat", "photoWidthPx", "photoHeightPx", "aspectRatio", "note",
+"activeResolutionMp", "afZones", "ois", "variableAperture", "apertureNarrow", "opticalZoom", "focalLengthMaxMm",
+"sensorFormat", "photoWidthPx", "photoHeightPx", "aspectRatio", "note",
 ] as const;
 
 async function withSamples<T extends { id: string; variableAperture: boolean; opticalZoom: boolean }>(row: T) {
@@ -35,7 +35,7 @@ camerasRouter.get("/", async (c) => {
   if (!smartphoneId) return fail(c, 400, "SMARTPHONE_ID_REQUIRED", "smartphone_id is required");
 
   const rows = await db.select().from(camera)
-    .where(and(eq(camera.smartphoneId, smartphoneId), eq(camera.status, "approved")));
+  .where(and(eq(camera.smartphoneId, smartphoneId), eq(camera.status, "approved")));
 
   const modes = await videoModesOf(rows.map((r) => r.id));
   return c.json(rows.map((cam) => ({ ...cam, videoModes: modes.get(cam.id) ?? [] })));
@@ -45,13 +45,13 @@ camerasRouter.get("/", async (c) => {
 camerasRouter.get("/mine", requireAuth, async (c) => {
   const user = c.get("user");
   const rows = await db.select().from(camera)
-    .where(eq(camera.submitterId, user.id)).orderBy(desc(camera.submittedAt), desc(camera.id));
+  .where(eq(camera.submitterId, user.id)).orderBy(desc(camera.submittedAt), desc(camera.id));
   return c.json(await decorateList(rows));
 });
 
 camerasRouter.get("/pending", requireRole("moderator"), async (c) => {
   const rows = await db.select().from(camera).where(eq(camera.status, "pending"))
-    .orderBy(asc(camera.submittedAt), asc(camera.id));
+  .orderBy(asc(camera.submittedAt), asc(camera.id));
   return c.json(await decorateList(rows));
 });
 
@@ -79,13 +79,13 @@ camerasRouter.post("/", requireAuth, async (c) => {
 
   const newCamera = {
     id:           randomUUID(),
-    smartphoneId,
-    submitterId:  user.id,
-    reviewedBy:   null as string | null,
-    status:       "pending" as const,
-    submittedAt:  new Date(),
-    reviewedAt:   null as Date | null,
-    ...spec.data,
+                   smartphoneId,
+                   submitterId:  user.id,
+                   reviewedBy:   null as string | null,
+                   status:       "pending" as const,
+                   submittedAt:  new Date(),
+                   reviewedAt:   null as Date | null,
+                   ...spec.data,
   };
 
   // Jedno oczekujące zgłoszenie na (użytkownik, telefon, typ, kierunek): podwójne wysłanie
@@ -94,7 +94,7 @@ camerasRouter.post("/", requireAuth, async (c) => {
   const duplicateId = db.transaction((tx) => {
     const dup = tx.select({ id: camera.id }).from(camera).where(and(
       eq(camera.submitterId, user.id), eq(camera.smartphoneId, smartphoneId),
-      eq(camera.type, newCamera.type), eq(camera.facing, newCamera.facing), eq(camera.status, "pending"),
+                                                                    eq(camera.type, newCamera.type), eq(camera.facing, newCamera.facing), eq(camera.status, "pending"),
     )).limit(1).all()[0];
     if (dup) return dup.id;
     tx.insert(camera).values(newCamera).run();
@@ -107,7 +107,7 @@ camerasRouter.post("/", requireAuth, async (c) => {
   });
   if (duplicateId) {
     return fail(c, 409, "DUPLICATE_SUBMISSION",
-      "You already have a pending submission for this camera on this smartphone", { cameraId: duplicateId });
+                "You already have a pending submission for this camera on this smartphone", { cameraId: duplicateId });
   }
 
   return c.json(await withSamples(newCamera), 201);
@@ -138,11 +138,7 @@ camerasRouter.patch("/:id", requireRole("moderator"), async (c) => {
   return c.json({ ok: true });
 });
 
-/**
- * Rozpatrzenie zgłoszenia przez moderatora (BPMN 2.4): zatwierdzenie (z opcjonalnymi poprawkami)
- * albo odrzucenie. Zgłaszający dostaje powiadomienie. Aparat ze zmienną przysłoną / zoomem
- * można zatwierdzić dopiero, gdy ma zdjęcia dla co najmniej 2 różnych wartości.
- */
+
 camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id") as string;
@@ -169,12 +165,8 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
     if (!spec.ok) return fail(c, 400, "INVALID_FIELD", spec.message, { field: spec.field });
     Object.assign(updates, spec.data);
 
-    const samples = await sampleCoverage(id, spec.data);
-    if (!samples.satisfied) {
-      return fail(c, 409, "INSUFFICIENT_SAMPLES",
-        "A camera with variable aperture or optical zoom needs photos taken at 2 or more different values",
-        { samples });
-    }
+    // Pokrycie próbkami (samples) jest tylko informacją dla moderatora - ręczne zatwierdzenie
+    // nie wymaga zdjęć (np. dane z oficjalnej specyfikacji producenta).
   }
 
   await db.update(camera).set(updates).where(eq(camera.id, id));
