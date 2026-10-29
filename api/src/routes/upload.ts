@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { eq } from "drizzle-orm";
+import { eq, and, ne, desc, sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { photo, video, camera } from "../db/schema.js";
 import { requireAuth, requireRole } from "../middleware/requireAuth.js";
@@ -12,8 +12,9 @@ import { fail } from "../lib/errors.js";
 import { parseMultipartUpload, UploadError, type ParsedUpload } from "../lib/multipart.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
-import { sniffFile, stripMetadataInPlace, downscaleInPlace, runImageJob } from "../lib/images.js";
+import { sniffFile, stripMetadataInPlace, downscaleInPlace, readDimensions, runImageJob } from "../lib/images.js";
 import { ensureVariants } from "../services/mediaVariants.js";
+import { phoneSummaries } from "../services/phones.js";
 
 const uploadRouter = new Hono<{ Variables: HonoVariables }>();
 type Ctx = Context<{ Variables: HonoVariables }>;
@@ -75,8 +76,7 @@ async function removeOrphan(url: string) {
   }
 }
 
-const REVIEW_IMAGE_MAX = 15 * 1024 * 1024; // obrazy w recenzjach (filmy mają limit VIDEO_MAX)
-const REVIEW_IMAGE_SIDE = 2048;            // dłuższy bok obrazu w recenzji po zmniejszeniu
+const REVIEW_IMAGE_MAX = PHOTO_MAX;           // obrazy w recenzjach: pełna rozdzielczość (filmy mają limit VIDEO_MAX)
 const DEVICE_IMAGE_SIDE = 1600;            // dłuższy bok zdjęcia telefonu w katalogu
 
 const unsupported = (c: Ctx, what: string) =>
@@ -104,8 +104,9 @@ uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
     const type = await sniffFile(upload.file.path);
     if (!type || type.kind !== "image") return unsupported(c, "JPEG, PNG, WebP, GIF, HEIC, AVIF");
 
-    // EXIF z lokalizacją GPS nie trafia na serwer (dane EXIF zostają w polach exif* rekordu)
-    await stripMetadataInPlace(upload.file.path, type.ext);
+    // Z EXIF zostają dane aparatu (model, obiektyw, ogniskowa, przysłona, czas, ISO, data);
+    // GPS, numery seryjne i dane właściciela są usuwane.
+    await stripMetadataInPlace(upload.file.path, type.ext, "camera");
 
     const objectKey = `${cameraId}/${randomUUID()}.${type.ext}`;
     const stored = storageUrl(BUCKETS.photos, objectKey);
@@ -136,10 +137,64 @@ uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
     return c.json({
       id: newPhoto.id, status: "pending", objectKey,
       thumbUrl: variantUrl(stored, "w480", false),
+      mediumUrl: variantUrl(stored, "w1280", false),
     }, 201);
   } finally {
     await upload.cleanup();
   }
+});
+
+/**
+ * Zdjęcia wgrane przez zalogowanego użytkownika (do galerii aparatów), najnowsze na górze.
+ * ?status=pending|verified, ?cameraId=, ?smartphoneId=, ?page= (od 1), ?limit= (domyślnie 30, maks. 100).
+ * Oczekujące zdjęcia mają podpisane linki (ważne 1-2 h), zweryfikowane - publiczne.
+ */
+uploadRouter.get("/photos/mine", requireAuth, async (c) => {
+  const user = c.get("user");
+  const q = c.req.query();
+  const page = q["page"] === undefined ? 1 : Number(q["page"]);
+  const limit = q["limit"] === undefined ? 30 : Number(q["limit"]);
+  if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return fail(c, 400, "INVALID_PAGE", "page must be >= 1 and limit between 1 and 100");
+  }
+  const conds: SQL[] = [eq(photo.uploaderId, user.id), ne(photo.status, "deleted")];
+  if (q["status"] !== undefined) {
+    if (q["status"] !== "pending" && q["status"] !== "verified") {
+      return fail(c, 400, "INVALID_FIELD", "status must be pending or verified", { field: "status" });
+    }
+    conds.push(eq(photo.status, q["status"]));
+  }
+  if (q["cameraId"]) conds.push(eq(photo.cameraId, q["cameraId"]));
+  if (q["smartphoneId"]) conds.push(eq(camera.smartphoneId, q["smartphoneId"]));
+  const where = and(...conds);
+
+  const rows = await db.select({
+    id: photo.id, cameraId: photo.cameraId, smartphoneId: camera.smartphoneId,
+    cameraType: camera.type, facing: camera.facing, status: photo.status, storageUrl: photo.storageUrl,
+    widthPx: photo.widthPx, heightPx: photo.heightPx,
+    exifFocalLength: photo.exifFocalLength, exifAperture: photo.exifAperture,
+    exifIso: photo.exifIso, exifShutterSpeed: photo.exifShutterSpeed, uploadDate: photo.uploadDate,
+  }).from(photo).innerJoin(camera, eq(photo.cameraId, camera.id))
+    .where(where).orderBy(desc(photo.uploadDate), desc(sql`${photo}.rowid`))
+    .limit(limit).offset((page - 1) * limit);
+  const total = (await db.select({ n: sql<number>`count(*)` }).from(photo)
+    .innerJoin(camera, eq(photo.cameraId, camera.id)).where(where))[0]?.n ?? 0;
+  const phones = await phoneSummaries(rows.map((r) => r.smartphoneId));
+
+  c.header("Cache-Control", "private, no-cache");
+  return c.json({
+    data: rows.map(({ storageUrl: s, ...r }) => {
+      const pub = r.status === "verified";
+      return {
+        ...r,
+        phone: phones.get(r.smartphoneId) ?? null,
+        url: mediaUrl(s, pub),
+        thumbUrl: variantUrl(s, "w480", pub),
+        mediumUrl: variantUrl(s, "w1280", pub),
+      };
+    }),
+    page, limit, total,
+  });
 });
 
 uploadRouter.post("/video/upload", requireAuth, videoLimit, async (c) => {
@@ -193,7 +248,8 @@ uploadRouter.post("/video/upload", requireAuth, videoLimit, async (c) => {
   }
 });
 
-// Obraz albo film do recenzji. Obraz: maks. 15 MB, zmniejszany do 2048 px i zapisywany bez metadanych.
+// Obraz albo film do recenzji. Obraz: maks. 60 MB, w pełnej rozdzielczości (bez ponownego kodowania),
+// z danymi aparatu w EXIF (bez GPS i numerów seryjnych) i miniaturami 480 px oraz 1280 px.
 uploadRouter.post("/review-media/upload", requireAuth, videoLimit, async (c) => {
   const r = await receive(c, VIDEO_MAX, []);
   if ("error" in r) return r.error;
@@ -206,10 +262,10 @@ uploadRouter.post("/review-media/upload", requireAuth, videoLimit, async (c) => 
     let dims: { width: number; height: number } | null = null;
     if (type.kind === "image") {
       if (upload.file.size > REVIEW_IMAGE_MAX) {
-        return fail(c, 413, "FILE_TOO_LARGE", "Review image is too large (max 15 MB)");
+        return fail(c, 413, "FILE_TOO_LARGE", "Review image is too large (max 60 MB)");
       }
-      await stripMetadataInPlace(upload.file.path, type.ext);
-      dims = await runImageJob(() => downscaleInPlace(upload.file.path, type.ext, REVIEW_IMAGE_SIDE));
+      await stripMetadataInPlace(upload.file.path, type.ext, "camera");
+      dims = await runImageJob(() => readDimensions(upload.file.path));
     }
 
     const objectKey = `${randomUUID()}.${type.ext}`;
@@ -226,13 +282,14 @@ uploadRouter.post("/review-media/upload", requireAuth, videoLimit, async (c) => 
       widthPx: dims?.width ?? null,
       heightPx: dims?.height ?? null,
       thumbUrl: variantUrl(stored, "w480", false),
+      mediumUrl: variantUrl(stored, "w1280", false),
     }, 201);
   } finally {
     await upload.cleanup();
   }
 });
 
-// Zdjęcie telefonu do katalogu (moderator): zmniejszane do 1600 px, bez metadanych, z miniaturą 512 px.
+// Zdjęcie telefonu do katalogu (moderator): zmniejszane do 1600 px, bez metadanych, z miniaturami 512 i 1024 px.
 uploadRouter.post("/device-image/upload", requireRole("moderator"), photoLimit, async (c) => {
   const r = await receive(c, PHOTO_MAX, []);
   if ("error" in r) return r.error;
@@ -242,7 +299,7 @@ uploadRouter.post("/device-image/upload", requireRole("moderator"), photoLimit, 
     const type = await sniffFile(upload.file.path);
     if (!type || type.kind !== "image" || type.ext === "heic") return unsupported(c, "JPEG, PNG, WebP, GIF, AVIF");
 
-    await stripMetadataInPlace(upload.file.path, type.ext);
+    await stripMetadataInPlace(upload.file.path, type.ext, "orientation");
     await runImageJob(() => downscaleInPlace(upload.file.path, type.ext, DEVICE_IMAGE_SIDE));
 
     const objectKey = `${randomUUID()}.${type.ext}`;
@@ -252,7 +309,7 @@ uploadRouter.post("/device-image/upload", requireRole("moderator"), photoLimit, 
 
     return c.json({
       objectKey, storageUrl: stored, url: publicUrl(stored),
-      imageThumbUrl: variantUrl(stored, "w512", true),
+      imageThumbUrl: variantUrl(stored, "w512", true), imageMediumUrl: variantUrl(stored, "w1024", true),
     }, 201);
   } finally {
     await upload.cleanup();

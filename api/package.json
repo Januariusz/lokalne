@@ -30,7 +30,8 @@
     "busboy": "1.6.0",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.7",
-    "nodemailer": "10.0.10"
+    "nodemailer": "10.0.10",
+    "sharp": "0.34.5"
   },
   "allowScripts": {
     "better-sqlite3@12.11.1": true,

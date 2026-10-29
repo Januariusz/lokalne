@@ -124,8 +124,8 @@ export const camera = sqliteTable("camera", {
   pixelPitchUm: real("pixel_pitch_um").notNull(),
   resolutionMp: real("resolution_mp").notNull(),
   activeResolutionMp: real("active_resolution_mp").notNull(),
-  afZones: integer("af_zones").notNull().default(0),
-  ois: text("ois", { enum: ["none", "optical", "sensor_shift"] }).notNull().default("none"),
+  afZones: integer("af_zones"),                        // null = nieznane
+  ois: text("ois", { enum: ["none", "optical", "sensor_shift"] }), // null = nieznane
   // Obiektyw ze zmienną przysłoną / zoomem optycznym: wymaga zdjęć przykładowych dla różnych wartości.
   variableAperture: integer("variable_aperture", { mode: "boolean" }).notNull().default(false),
   apertureNarrow: real("aperture_narrow"),            // największa liczba f (najbardziej przymknięta przysłona)
@@ -204,6 +204,17 @@ export const review = sqliteTable("review", {
   index("idx_review_smartphone").on(t.smartphoneId),
   index("idx_review_phone_status_upd").on(t.smartphoneId, t.status, sql`${t.updatedAt} DESC`),
   index("idx_review_author_upd").on(t.authorId, sql`${t.updatedAt} DESC`),
+]);
+
+// Telefony, których dotyczy recenzja (recenzja porównawcza ma ich kilka). position 0 = telefon główny,
+// ten sam co review.smartphone_id; każda recenzja ma tu co najmniej jeden wiersz.
+export const reviewSmartphone = sqliteTable("review_smartphone", {
+  reviewId: text("review_id").notNull().references(() => review.id, { onDelete: "cascade" }),
+  smartphoneId: text("smartphone_id").notNull().references(() => smartphone.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.reviewId, t.smartphoneId] }),
+  index("idx_review_smartphone_phone").on(t.smartphoneId),
 ]);
 
 export const reviewMedia = sqliteTable("review_media", {

@@ -43,7 +43,7 @@ favoritesRouter.get("/", requireAuth, async (c) => {
     ...r,
     verified: verifiedBy !== null,
     imageUrl: publicUrl(r.imageUrl),
-    imageThumbUrl: variantUrl(r.imageUrl, "w512", true),
+    imageThumbUrl: variantUrl(r.imageUrl, "w512", true), imageMediumUrl: variantUrl(r.imageUrl, "w1024", true),
   })));
 });
 

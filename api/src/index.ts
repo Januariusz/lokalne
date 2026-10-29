@@ -13,6 +13,7 @@ import { ensureStorageDirs } from "./lib/storage.js";
 import { startAggregationScheduler } from "./services/cameraAggregation.js";
 import { startVariantBackfill } from "./services/mediaVariants.js";
 import { db, optimizeDatabase } from "./db/index.js";
+import { backfillReviewPhones } from "./services/reviewPhones.js";
 import { camera } from "./db/schema.js";
 import { sensorDenominatorOf } from "./lib/cameraSpec.js";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
@@ -91,6 +92,10 @@ for (const r of db.select({ id: camera.id, f: camera.sensorFormat }).from(camera
   const d = sensorDenominatorOf(r.f);
   if (d !== null) db.update(camera).set({ sensorDenominator: d }).where(eq(camera.id, r.id)).run();
 }
+
+// Recenzje sprzed recenzji porównawczych: wiersz z telefonem głównym w review_smartphone.
+const linkedReviews = backfillReviewPhones();
+if (linkedReviews > 0) console.log(`[reviews] linked ${linkedReviews} reviews to their smartphones`);
 
 // Statystyki dla planisty zapytań SQLite: przy starcie i raz na dobę.
 optimizeDatabase();

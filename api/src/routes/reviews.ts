@@ -2,12 +2,15 @@ import { Hono, type Context } from "hono";
 import { etag } from "hono/etag";
 import { db } from "../db/index.js";
 import { review, reviewMedia, reviewComment, reviewLike, smartphone, user } from "../db/schema.js";
-import { eq, and, desc, asc, inArray, sql, type SQL } from "drizzle-orm";
+import { eq, and, ne, desc, asc, inArray, sql, type SQL } from "drizzle-orm";
 import { requireAuth, requireRole, hasRole, optionalUser } from "../middleware/requireAuth.js";
 import {
   storageUrl, objectExists, mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl, BUCKETS, variantUrl,
 } from "../lib/storage.js";
 import { phoneSummaries } from "../services/phones.js";
+import {
+  parseReviewPhones, missingPhones, setReviewPhones, phonesOfReviews, reviewMentionsPhone, MAX_REVIEW_PHONES,
+} from "../services/reviewPhones.js";
 import { fail } from "../lib/errors.js";
 import { notify } from "../lib/notifications.js";
 import type { HonoVariables } from "../types/honoTypes.js";
@@ -85,7 +88,12 @@ async function decorate(rows: ReviewRow[], viewerId: string | null, opts: Decora
       : [],
   );
   const media = await db.select().from(reviewMedia).where(inArray(reviewMedia.reviewId, ids));
-  const phones = await phoneSummaries(rows.map((r) => r.smartphoneId));
+  const phoneLists = phonesOfReviews(ids);
+  const listOf = (r: ReviewRow) => {
+    const l = phoneLists.get(r.id) ?? [];
+    return l[0] === r.smartphoneId ? l : [r.smartphoneId, ...l.filter((x) => x !== r.smartphoneId)];
+  };
+  const phones = await phoneSummaries(rows.flatMap(listOf));
 
   return rows.map((r) => {
     const isPublic = r.status === "published";
@@ -95,7 +103,9 @@ async function decorate(rows: ReviewRow[], viewerId: string | null, opts: Decora
         ...m,
         url: mediaUrl(m.storageUrl, isPublic),
         thumbUrl: m.type === "photo" ? variantUrl(m.storageUrl, "w480", isPublic) : null,
+        mediumUrl: m.type === "photo" ? variantUrl(m.storageUrl, "w1280", isPublic) : null,
       }));
+    const smartphoneIds = listOf(r);
     const base = {
       ...r,
       authorName:   authors.get(r.authorId) ?? null,
@@ -103,6 +113,10 @@ async function decorate(rows: ReviewRow[], viewerId: string | null, opts: Decora
       commentCount: comments.get(r.id) ?? 0,
       likedByMe:    liked.has(r.id),
       phone:        phones.get(r.smartphoneId) ?? null,
+      // recenzja porównawcza: wszystkie telefony, główny pierwszy (dla zwykłej recenzji jeden)
+      smartphoneIds,
+      phones:       smartphoneIds.map((pid) => phones.get(pid)).filter((x) => x !== undefined),
+      isComparison: smartphoneIds.length > 1,
     };
     if (!opts.summary) return { ...base, media: items };
     const { contentMarkdown, ...rest } = base;
@@ -177,8 +191,16 @@ reviewsRouter.get("/", async (c) => {
   const smartphoneId = c.req.query("smartphone_id");
   if (!smartphoneId) return fail(c, 400, "SMARTPHONE_ID_REQUIRED", "smartphone_id is required");
 
+  // Także recenzje porównawcze, w których ten telefon jest jednym z porównywanych.
+  // ?comparison=only - tylko porównawcze, ?comparison=exclude - bez porównawczych.
+  const cmp = c.req.query("comparison");
+  const conds: SQL[] = [reviewMentionsPhone(smartphoneId), eq(review.status, "published")];
+  const multi = sql`(SELECT count(*) FROM review_smartphone rs WHERE rs.review_id = ${review.id}) > 1`;
+  if (cmp === "only") conds.push(multi);
+  else if (cmp === "exclude") conds.push(sql`NOT ${multi}`);
+
   const viewer = await optionalUser(c);
-  return reviewList(c, and(eq(review.smartphoneId, smartphoneId), eq(review.status, "published"))!,
+  return reviewList(c, and(...conds)!,
     [desc(review.updatedAt), desc(review.id)], viewer?.id ?? null);
 });
 
@@ -291,46 +313,125 @@ reviewsRouter.delete("/:id/like", requireAuth, async (c) => {
 
 // ── Tworzenie / edycja / usuwanie ────────────────────────────────────────────
 
+const MAX_REVIEW_MEDIA = 30;
+const OBJECT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm"]);
+
+type MediaPlanItem = { id: string; type: "photo" | "video"; storageUrl: string; displayOrder: number; isNew: boolean };
+type MediaPlan = { ok: true; items: MediaPlanItem[] } | { ok: false; status: 400 | 409; code: string; message: string };
+
+/**
+ * Docelowa lista mediów recenzji z `mediaItems`. Każdy element to:
+ *  - istniejące medium tej recenzji: { id } albo { objectKey } pliku już podpiętego,
+ *  - nowy plik z /api/upload/review-media/upload: { objectKey, type? } (typ domyślnie z rozszerzenia).
+ * `displayOrder` jest opcjonalne (domyślnie kolejność w tablicy); wynik jest numerowany od 0.
+ * Plik nie może należeć do innej recenzji i musi istnieć na dysku.
+ */
+async function planMedia(raw: unknown, reviewId: string | null): Promise<MediaPlan> {
+  const bad = (message: string): MediaPlan => ({ ok: false, status: 400, code: "INVALID_MEDIA", message });
+  if (!Array.isArray(raw)) return bad("mediaItems must be an array");
+  if (raw.length > MAX_REVIEW_MEDIA) return bad(`mediaItems can have at most ${MAX_REVIEW_MEDIA} items`);
+
+  const current = reviewId
+    ? await db.select().from(reviewMedia).where(eq(reviewMedia.reviewId, reviewId))
+    : [];
+  const byId = new Map(current.map((m) => [m.id, m]));
+  const byUrl = new Map(current.map((m) => [m.storageUrl, m]));
+
+  const planned: (MediaPlanItem & { sortKey: number; index: number })[] = [];
+  const seen = new Set<string>();
+  for (const [index, it] of raw.entries()) {
+    if (!it || typeof it !== "object") return bad(`mediaItems[${index}] must be an object`);
+    const o = it as { id?: unknown; objectKey?: unknown; type?: unknown; displayOrder?: unknown };
+    if (o.displayOrder !== undefined && (typeof o.displayOrder !== "number" || !Number.isFinite(o.displayOrder))) {
+      return bad(`mediaItems[${index}].displayOrder must be a number`);
+    }
+    if (o.type !== undefined && o.type !== "photo" && o.type !== "video") return bad(`mediaItems[${index}].type must be photo or video`);
+    const sortKey = typeof o.displayOrder === "number" ? o.displayOrder : index;
+
+    let existing = typeof o.id === "string" ? byId.get(o.id) : undefined;
+    if (o.id !== undefined && !existing) return bad(`mediaItems[${index}].id does not belong to this review`);
+    let url: string;
+    if (existing) url = existing.storageUrl;
+    else {
+      if (typeof o.objectKey !== "string" || !OBJECT_KEY_RE.test(o.objectKey)) return bad(`mediaItems[${index}] needs an id or a valid objectKey`);
+      url = storageUrl(BUCKETS.reviewMedia, o.objectKey);
+      existing = byUrl.get(url);
+    }
+    if (seen.has(url)) return bad(`mediaItems[${index}] is a duplicate`);
+    seen.add(url);
+
+    if (existing) {
+      planned.push({ id: existing.id, type: existing.type, storageUrl: url, displayOrder: 0, isNew: false, sortKey, index });
+      continue;
+    }
+    const key = o.objectKey as string;
+    if (!(await objectExists(BUCKETS.reviewMedia, key))) {
+      return { ok: false, status: 409, code: "UPLOAD_NOT_FOUND", message: `Uploaded object not found: ${key}` };
+    }
+    const taken = await db.select({ id: reviewMedia.id }).from(reviewMedia)
+      .where(reviewId ? and(eq(reviewMedia.storageUrl, url), ne(reviewMedia.reviewId, reviewId)) : eq(reviewMedia.storageUrl, url));
+    if (taken[0]) return { ok: false, status: 409, code: "INVALID_MEDIA", message: `Object already used by another review: ${key}` };
+    const ext = key.split(".").pop()?.toLowerCase() ?? "";
+    const type = (o.type as "photo" | "video" | undefined) ?? (VIDEO_EXTS.has(ext) ? "video" : "photo");
+    planned.push({ id: randomUUID(), type, storageUrl: url, displayOrder: 0, isNew: true, sortKey, index });
+  }
+  planned.sort((a, b) => a.sortKey - b.sortKey || a.index - b.index);
+  return { ok: true, items: planned.map(({ sortKey: _s, index: _i, ...m }, i) => ({ ...m, displayOrder: i })) };
+}
+
+function phonesError(c: Ctx, ids: string[] | null) {
+  if (ids === null || ids.length === 0) {
+    return fail(c, 400, "INVALID_SMARTPHONES",
+      `Provide smartphoneId or smartphoneIds (1-${MAX_REVIEW_PHONES} distinct ids, the first is the main phone)`,
+      { field: "smartphoneIds" });
+  }
+  const missing = missingPhones(ids);
+  if (missing.length) return fail(c, 404, "SMARTPHONE_NOT_FOUND", "Smartphone not found", { missing });
+  return null;
+}
+
 /**
  * Każdy zalogowany użytkownik może napisać recenzję:
  *  - zwykły użytkownik: recenzja trafia do weryfikacji (status "pending"),
  *  - reviewer / moderator / admin: recenzja jest od razu opublikowana ("published").
+ * Recenzja porównawcza: `smartphoneIds` (2-5 telefonów, pierwszy = główny).
  */
 reviewsRouter.post("/", requireAuth, async (c) => {
   const u = c.get("user");
 
   const body = await c.req.json<{
-    smartphoneId: string;
-    title: string;
-    contentMarkdown: string;
-    mediaItems?: Array<{ objectKey: string; type: "photo" | "video"; displayOrder: number }>;
+    smartphoneId?: unknown;
+    smartphoneIds?: unknown;
+    title?: unknown;
+    contentMarkdown?: unknown;
+    mediaItems?: unknown;
   }>().catch(() => null);
-  if (!body) return fail(c, 400, "INVALID_BODY", "Request body must be valid JSON");
+  if (!body || typeof body !== "object") return fail(c, 400, "INVALID_BODY", "Request body must be valid JSON");
 
-  if (!body.smartphoneId || !body.title || !body.contentMarkdown) {
-    return fail(c, 400, "MISSING_FIELDS", "smartphoneId, title and contentMarkdown are required");
+  if ((body.smartphoneId === undefined && body.smartphoneIds === undefined)
+      || typeof body.title !== "string" || !body.title.trim()
+      || typeof body.contentMarkdown !== "string" || !body.contentMarkdown) {
+    return fail(c, 400, "MISSING_FIELDS", "smartphoneId (or smartphoneIds), title and contentMarkdown are required");
   }
 
-  const phone = await db.select({ id: smartphone.id }).from(smartphone)
-    .where(eq(smartphone.id, body.smartphoneId));
-  if (!phone[0]) return fail(c, 404, "SMARTPHONE_NOT_FOUND", "Smartphone not found");
+  const phoneIds = parseReviewPhones(body.smartphoneId, body.smartphoneIds);
+  const phoneErr = phonesError(c, phoneIds);
+  if (phoneErr) return phoneErr;
 
-  // Nie ufamy ślepo objectKey od klienta - sprawdzamy, że plik naprawdę jest w magazynie,
-  // zanim zapiszemy na niego wskaźnik w bazie.
-  if (body.mediaItems?.length) {
-    for (const m of body.mediaItems) {
-      if (!(await objectExists(BUCKETS.reviewMedia, m.objectKey))) {
-        return fail(c, 409, "UPLOAD_NOT_FOUND", `Uploaded object not found: ${m.objectKey}`);
-      }
-    }
-  }
+  // Nie ufamy ślepo objectKey od klienta - sprawdzamy, że plik naprawdę jest w magazynie
+  // i nie jest podpięty do innej recenzji, zanim zapiszemy na niego wskaźnik w bazie.
+  const plan = body.mediaItems === undefined || body.mediaItems === null
+    ? { ok: true as const, items: [] }
+    : await planMedia(body.mediaItems, null);
+  if (!plan.ok) return fail(c, plan.status, plan.code, plan.message, { field: "mediaItems" });
 
   const canPublish = hasRole(u.role, "reviewer");
 
   const newReview = {
     id:              randomUUID(),
     authorId:        u.id,
-    smartphoneId:    body.smartphoneId,
+    smartphoneId:    phoneIds![0]!,
     title:           body.title.trim(),
     contentMarkdown: body.contentMarkdown,
     status:          (canPublish ? "published" : "pending") as ReviewStatus,
@@ -338,22 +439,18 @@ reviewsRouter.post("/", requireAuth, async (c) => {
     updatedAt:       new Date(),
   };
 
-  await db.insert(review).values(newReview);
+  db.transaction((tx) => {
+    tx.insert(review).values(newReview).run();
+    setReviewPhones(tx, newReview.id, phoneIds!);
+    if (plan.items.length) {
+      tx.insert(reviewMedia).values(plan.items.map((m) => ({
+        id: m.id, reviewId: newReview.id, type: m.type, storageUrl: m.storageUrl, displayOrder: m.displayOrder,
+      }))).run();
+    }
+  });
+  if (plan.items.length) await syncMediaVisibility(newReview.id, newReview.status);
 
-  if (body.mediaItems?.length) {
-    await db.insert(reviewMedia).values(
-      body.mediaItems.map(m => ({
-        id:           randomUUID(),
-        reviewId:     newReview.id,
-        type:         m.type,
-        storageUrl:   storageUrl(BUCKETS.reviewMedia, m.objectKey),
-        displayOrder: m.displayOrder,
-      }))
-    );
-    await syncMediaVisibility(newReview.id, newReview.status);
-  }
-
-  return c.json(newReview, 201);
+  return c.json({ ...newReview, smartphoneIds: phoneIds, isComparison: phoneIds!.length > 1 }, 201);
 });
 
 /**
@@ -386,14 +483,38 @@ reviewsRouter.patch("/:id", requireAuth, async (c) => {
     title?: string;
     contentMarkdown?: string;
     status?: ReviewStatus;
+    smartphoneId?: unknown;
+    smartphoneIds?: unknown;
+    mediaItems?: unknown;
   }>().catch(() => null);
-  if (!body) return fail(c, 400, "INVALID_BODY", "Request body must be valid JSON");
+  if (!body || typeof body !== "object") return fail(c, 400, "INVALID_BODY", "Request body must be valid JSON");
 
   if (body.status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(body.status)) {
     return fail(c, 400, "INVALID_STATUS", `status must be one of: ${REVIEW_STATUSES.join(", ")}`);
   }
-  if ((body.title || body.contentMarkdown) && !isOwner) {
-    return fail(c, 403, "FORBIDDEN", "Only the author can edit the review text");
+  if ((body.title !== undefined && typeof body.title !== "string")
+      || (body.contentMarkdown !== undefined && typeof body.contentMarkdown !== "string")) {
+    return fail(c, 400, "INVALID_FIELD", "title and contentMarkdown must be strings");
+  }
+  const phonesGiven = body.smartphoneId !== undefined || body.smartphoneIds !== undefined;
+  const mediaGiven = body.mediaItems !== undefined;
+  const contentEdit = Boolean(body.title || body.contentMarkdown) || phonesGiven || mediaGiven;
+  if (contentEdit && !isOwner) {
+    return fail(c, 403, "FORBIDDEN", "Only the author can edit the review content");
+  }
+
+  // Telefony: pełna nowa lista (pierwszy = główny). Media: pełna nowa lista (dodanie, usunięcie, kolejność).
+  let phoneIds: string[] | null = null;
+  if (phonesGiven) {
+    phoneIds = parseReviewPhones(body.smartphoneId, body.smartphoneIds);
+    const phoneErr = phonesError(c, phoneIds);
+    if (phoneErr) return phoneErr;
+  }
+  let plan: MediaPlanItem[] | null = null;
+  if (mediaGiven) {
+    const p = await planMedia(body.mediaItems ?? [], id);
+    if (!p.ok) return fail(c, p.status, p.code, p.message, { field: "mediaItems" });
+    plan = p.items;
   }
 
   const updates: Partial<typeof review.$inferInsert> = { updatedAt: new Date() };
@@ -414,7 +535,7 @@ reviewsRouter.patch("/:id", requireAuth, async (c) => {
         :                     false;
       if (!allowed) return fail(c, 403, "STATUS_NOT_ALLOWED", "You cannot set this status");
       updates.status = s;
-    } else if ((body.title || body.contentMarkdown) && current.status === "published" && !canPublish) {
+    } else if (contentEdit && current.status === "published" && !canPublish) {
       updates.status = "pending";
     }
   } else if (body.status !== undefined) {
@@ -424,14 +545,39 @@ reviewsRouter.patch("/:id", requireAuth, async (c) => {
     updates.status = body.status;
   }
 
-  await db.update(review).set(updates).where(eq(review.id, id));
+  const removedFiles: string[] = [];
+  db.transaction((tx) => {
+    tx.update(review).set(updates).where(eq(review.id, id)).run();
+    if (phoneIds) setReviewPhones(tx, id, phoneIds);
+    if (plan) {
+      const keep = new Set(plan.map((m) => m.storageUrl));
+      for (const m of tx.select().from(reviewMedia).where(eq(reviewMedia.reviewId, id)).all()) {
+        if (!keep.has(m.storageUrl)) removedFiles.push(m.storageUrl);
+      }
+      tx.delete(reviewMedia).where(eq(reviewMedia.reviewId, id)).run();
+      if (plan.length) {
+        tx.insert(reviewMedia).values(plan.map((m) => ({
+          id: m.id, reviewId: id, type: m.type, storageUrl: m.storageUrl, displayOrder: m.displayOrder,
+        }))).run();
+      }
+    }
+  });
+
+  // Usunięte z recenzji pliki znikają z dysku; błąd sprzątania nie cofa zmiany.
+  for (const r of await Promise.allSettled(removedFiles.map((u) => deleteStoredObject(u)))) {
+    if (r.status === "rejected") console.error("[review-media] cleanup failed:", r.reason);
+  }
 
   const finalStatus = (updates.status ?? current.status) as ReviewStatus;
-  if (finalStatus !== current.status) {
+  if (finalStatus !== current.status || (plan && plan.some((m) => m.isNew))) {
     await syncMediaVisibility(id, finalStatus);
-    if (!isOwner) await notify(current.authorId, "review_status", { reviewId: id, status: finalStatus });
   }
-  return c.json({ ok: true, status: finalStatus });
+  if (finalStatus !== current.status && !isOwner) {
+    await notify(current.authorId, "review_status", { reviewId: id, status: finalStatus });
+  }
+  const fresh = (await db.select().from(review).where(eq(review.id, id)))[0]!;
+  const decorated = (await decorate([fresh], u.id))[0]!;
+  return c.json({ ok: true, status: finalStatus, review: decorated });
 });
 
 // Usuwa autor albo administrator (moderator nie usuwa cudzych recenzji).

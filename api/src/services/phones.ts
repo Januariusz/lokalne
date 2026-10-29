@@ -4,6 +4,7 @@ import {
   brand, camera, cameraVideoMode, favorite, review, smartphone, smartphoneBuildModel,
 } from "../db/schema.js";
 import { deleteStoredObject, publicUrl, variantUrl } from "../lib/storage.js";
+import { mergeReviewPhones } from "./reviewPhones.js";
 
 // ── kody modelu (Build.MODEL / identyfikator iOS) ────────────────────────────────────────────────
 
@@ -111,7 +112,7 @@ export async function getSmartphoneDetails(ids: string[]) {
     ...r.phone,
     verified:      r.phone.verifiedBy !== null,
     imageUrl:      publicUrl(r.phone.imageUrl),
-    imageThumbUrl: variantUrl(r.phone.imageUrl, "w512", true),
+    imageThumbUrl: variantUrl(r.phone.imageUrl, "w512", true), imageMediumUrl: variantUrl(r.phone.imageUrl, "w1024", true),
     brandName:     r.brandName,
     brandLogoUrl:  publicUrl(r.brandLogoUrl),
     buildModels:   codes.get(r.phone.id) ?? [],
@@ -126,14 +127,14 @@ export async function getSmartphoneDetail(id: string) {
 
 /** Krótki opis telefonów (do list "moje recenzje", "moje aparaty" itp.), mapa id -> opis. */
 export async function phoneSummaries(ids: string[]) {
-  const map = new Map<string, { id: string; modelName: string; brandName: string | null; imageUrl: string | null; imageThumbUrl: string | null }>();
+  const map = new Map<string, { id: string; modelName: string; brandName: string | null; imageUrl: string | null; imageThumbUrl: string | null; imageMediumUrl: string | null }>();
   const unique = [...new Set(ids)];
   if (unique.length === 0) return map;
   const rows = await db.select({
     id: smartphone.id, modelName: smartphone.modelName, brandName: brand.name, imageUrl: smartphone.imageUrl,
   }).from(smartphone).leftJoin(brand, eq(smartphone.brandId, brand.id)).where(inArray(smartphone.id, unique));
   for (const r of rows) {
-    map.set(r.id, { ...r, imageUrl: publicUrl(r.imageUrl), imageThumbUrl: variantUrl(r.imageUrl, "w512", true) });
+    map.set(r.id, { ...r, imageUrl: publicUrl(r.imageUrl), imageThumbUrl: variantUrl(r.imageUrl, "w512", true), imageMediumUrl: variantUrl(r.imageUrl, "w1024", true) });
   }
   return map;
 }
@@ -155,6 +156,7 @@ export async function mergeSmartphones(targetId: string, sourceId: string) {
 
     const cams = tx.update(camera).set({ smartphoneId: targetId }).where(eq(camera.smartphoneId, sourceId)).run().changes;
     const revs = tx.update(review).set({ smartphoneId: targetId }).where(eq(review.smartphoneId, sourceId)).run().changes;
+    mergeReviewPhones(tx, targetId, sourceId); // także recenzje porównawcze
 
     // ulubione: użytkownik, który miał oba telefony, zostaje z jednym wpisem
     const favs = tx.run(sql`INSERT OR IGNORE INTO ${favorite} (user_id, smartphone_id, added_at)

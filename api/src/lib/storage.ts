@@ -113,7 +113,7 @@ export async function storeFile(
 // ── Warianty obrazów (miniatury) ──────────────────────────────────────────────
 // Leżą obok oryginału, w tym samym katalogu (publicznym albo prywatnym):
 //   photos/<cam>/<uuid>.jpg -> photos/<cam>/<uuid>.w480.webp, photos/<cam>/<uuid>.w1280.webp
-export const VARIANTS = ["w480", "w1280", "w512"] as const;
+export const VARIANTS = ["w480", "w1280", "w512", "w1024"] as const;
 export type Variant = (typeof VARIANTS)[number];
 
 export function variantKey(key: string, variant: Variant): string {

@@ -24,10 +24,12 @@ function median(values: number[]): number {
     : sorted[mid]!;
 }
 
-function mode<T extends string | number>(values: T[]): T {
+// Najczęstsza znana wartość; null (= nieznane) nie głosuje. Same null -> null.
+function mode<T extends string | number>(all: (T | null)[]): T | null {
+  const values = all.filter((v): v is T => v !== null);
   const freq = new Map<T, number>();
   for (const v of values) freq.set(v, (freq.get(v) ?? 0) + 1);
-  let best = values[0] as T;
+  let best: T | null = values[0] ?? null;
   let bestCount = 0;
   for (const [v, count] of freq) {
     if (count > bestCount) { best = v; bestCount = count; }
@@ -54,7 +56,7 @@ function agreementScore(rows: CameraRow[]): number {
   let totalChecks = 0;
   let matching = 0;
   for (const key of DISCRETE_KEYS) {
-    const values = rows.map(r => r[key]);
+    const values = rows.map(r => r[key]).filter((v) => v !== null);
     const modeVal = mode(values);
     for (const v of values) {
       totalChecks++;
@@ -89,7 +91,7 @@ async function aggregateGroup(rows: CameraRow[]) {
       consensusNumeric[key] = Math.round(median(values) * 100) / 100;
     }
 
-    const consensusDiscrete: { afZones: number; ois: CameraRow["ois"] } = {
+    const consensusDiscrete: { afZones: number | null; ois: CameraRow["ois"] } = {
       afZones: mode(cleanRows.map(r => r.afZones)),
       ois:     mode(cleanRows.map(r => r.ois)),
     };

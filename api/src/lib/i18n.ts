@@ -71,6 +71,9 @@ const PL: Record<string, string> = {
   BUILD_MODEL_TAKEN:        "Ten kod modelu jest już przypisany do innego telefonu",
   MERGE_SAME_PHONE:         "Nie można scalić telefonu z nim samym",
   INVALID_PAGE:             "Nieprawidłowy numer strony lub limit",
+  DUPLICATE_SUBMISSION:     "Masz już oczekujące zgłoszenie tego aparatu dla tego telefonu",
+  INVALID_MEDIA:            "Nieprawidłowe media recenzji",
+  INVALID_SMARTPHONES:      "Nieprawidłowa lista telefonów recenzji",
   PASSWORD_TOO_WEAK:        "Hasło musi mieć co najmniej 8 znaków oraz zawierać małą literę, wielką literę, cyfrę i znak specjalny",
   // better-auth
   INVALID_EMAIL_OR_PASSWORD: "Nieprawidłowy e-mail lub hasło",

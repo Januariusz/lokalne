@@ -12,8 +12,8 @@ type Spec = { variant: Variant; width: number; quality: number };
 /** Jakie miniatury powstają dla danego rodzaju pliku. */
 export const VARIANT_SPECS: Record<"photo" | "review" | "device", Spec[]> = {
   photo:  [{ variant: "w480", width: 480, quality: 75 }, { variant: "w1280", width: 1280, quality: 80 }],
-  review: [{ variant: "w480", width: 480, quality: 75 }],
-  device: [{ variant: "w512", width: 512, quality: 80 }],
+  review: [{ variant: "w480", width: 480, quality: 75 }, { variant: "w1280", width: 1280, quality: 82 }],
+  device: [{ variant: "w512", width: 512, quality: 80 }, { variant: "w1024", width: 1024, quality: 82 }],
 };
 
 function extOf(key: string): string {

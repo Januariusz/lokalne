@@ -88,14 +88,27 @@ camerasRouter.post("/", requireAuth, async (c) => {
     ...spec.data,
   };
 
-  db.transaction((tx) => {
+  // Jedno oczekujące zgłoszenie na (użytkownik, telefon, typ, kierunek): podwójne wysłanie
+  // (np. dwa kliknięcia albo ponowienie po zerwanym połączeniu) nie tworzy duplikatu.
+  // Sprawdzenie w tej samej transakcji co zapis, więc dwa równoległe żądania też nie przejdą.
+  const duplicateId = db.transaction((tx) => {
+    const dup = tx.select({ id: camera.id }).from(camera).where(and(
+      eq(camera.submitterId, user.id), eq(camera.smartphoneId, smartphoneId),
+      eq(camera.type, newCamera.type), eq(camera.facing, newCamera.facing), eq(camera.status, "pending"),
+    )).limit(1).all()[0];
+    if (dup) return dup.id;
     tx.insert(camera).values(newCamera).run();
     if (modes.data.length) {
       tx.insert(cameraVideoMode).values(
         modes.data.map(m => ({ id: randomUUID(), cameraId: newCamera.id, ...m })),
       ).run();
     }
+    return null;
   });
+  if (duplicateId) {
+    return fail(c, 409, "DUPLICATE_SUBMISSION",
+      "You already have a pending submission for this camera on this smartphone", { cameraId: duplicateId });
+  }
 
   return c.json(await withSamples(newCamera), 201);
 });

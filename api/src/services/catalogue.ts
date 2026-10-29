@@ -272,7 +272,7 @@ export function listItem<T extends { imageUrl: string | null; verifiedBy?: strin
     ...rest,
     verified: verifiedBy !== null && verifiedBy !== undefined,
     imageUrl: publicUrl(r.imageUrl),
-    imageThumbUrl: variantUrl(r.imageUrl, "w512", true),
+    imageThumbUrl: variantUrl(r.imageUrl, "w512", true), imageMediumUrl: variantUrl(r.imageUrl, "w1024", true),
   };
 }
 

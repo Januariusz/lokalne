@@ -4,7 +4,8 @@ import { db } from "../db/index.js";
 import { smartphone, camera, brand, photo, video, smartphoneBuildModel } from "../db/schema.js";
 import { eq, and, sql, desc, asc, gte, type SQL } from "drizzle-orm";
 import { requireRole, requireAuth, hasRole } from "../middleware/requireAuth.js";
-import { publicUrl, variantUrl } from "../lib/storage.js";
+import { publicUrl, variantUrl, deleteStoredObject } from "../lib/storage.js";
+import { detachPhoneFromReviews } from "../services/reviewPhones.js";
 import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
 import {
   parseCatalogueQuery, parseCatalogueBody, searchCatalogue, FACINGS, type ParseError,
@@ -367,7 +368,7 @@ smartphonesRouter.post("/", requireAuth, async (c) => {
   return c.json({
     ...newPhone,
     imageUrl: publicUrl(newPhone.imageUrl),
-    imageThumbUrl: variantUrl(newPhone.imageUrl, "w512", true),
+    imageThumbUrl: variantUrl(newPhone.imageUrl, "w512", true), imageMediumUrl: variantUrl(newPhone.imageUrl, "w1024", true),
     verified: newPhone.verifiedBy !== null,
     buildModels,
     existing: false,
@@ -458,7 +459,11 @@ smartphonesRouter.delete("/:id", requireRole("admin"), async (c) => {
   const cameraIds = (await db.select({ id: camera.id }).from(camera).where(eq(camera.smartphoneId, id)))
     .map((r) => r.id);
   await deleteCamerasWithMedia(cameraIds);
+  // recenzje porównawcze zostają (z kolejnym telefonem jako głównym); recenzje tylko o tym telefonie
+  // znikają kaskadowo razem z nim, a ich pliki usuwamy z dysku
+  const reviewFiles = detachPhoneFromReviews(id);
   await db.delete(smartphone).where(eq(smartphone.id, id));
+  await Promise.allSettled(reviewFiles.map((u) => deleteStoredObject(u)));
   return c.json({ ok: true });
 });
 

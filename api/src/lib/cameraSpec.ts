@@ -15,8 +15,8 @@ export type CameraSpec = {
   pixelPitchUm: number;
   resolutionMp: number;
   activeResolutionMp: number;
-  afZones: number;
-  ois: (typeof OIS_TYPES)[number];
+  afZones: number | null;
+  ois: (typeof OIS_TYPES)[number] | null;
   variableAperture: boolean;
   apertureNarrow: number | null;
   opticalZoom: boolean;
@@ -94,15 +94,16 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
     return bad("activeResolutionMp", "activeResolutionMp cannot exceed resolutionMp");
   }
 
-  const afRaw = input["afZones"] ?? 0;
-  const afZones = num(afRaw);
-  if (afZones === null || !Number.isInteger(afZones) || afZones < 0 || afZones > 100000) {
-    return bad("afZones", "afZones must be an integer between 0 and 100000");
+  // afZones i ois: brak albo null = nieznane (0 / "none" znaczą "na pewno brak").
+  const afRaw = input["afZones"] ?? null;
+  const afZones = afRaw === null ? null : num(afRaw);
+  if (afRaw !== null && (afZones === null || !Number.isInteger(afZones) || afZones < 0 || afZones > 100000)) {
+    return bad("afZones", "afZones must be null or an integer between 0 and 100000");
   }
 
-  const ois = input["ois"] ?? "none";
-  if (typeof ois !== "string" || !(OIS_TYPES as readonly string[]).includes(ois)) {
-    return bad("ois", `ois must be one of: ${OIS_TYPES.join(", ")}`);
+  const ois = input["ois"] ?? null;
+  if (ois !== null && (typeof ois !== "string" || !(OIS_TYPES as readonly string[]).includes(ois))) {
+    return bad("ois", `ois must be null or one of: ${OIS_TYPES.join(", ")}`);
   }
 
   const variableAperture = input["variableAperture"] ?? false;
