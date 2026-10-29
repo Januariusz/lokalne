@@ -8,6 +8,7 @@ import { notify } from "../lib/notifications.js";
 import { validateCameraSpec, validateVideoModes, sampleCoverage, sampleCoverageMany } from "../lib/cameraSpec.js";
 import { phoneSummaries, videoModesOf } from "../services/phones.js";
 import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
+import { approvedTwin } from "../services/cameraTwins.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
 
@@ -91,12 +92,15 @@ camerasRouter.post("/", requireAuth, async (c) => {
   // Jedno oczekujące zgłoszenie na (użytkownik, telefon, typ, kierunek): podwójne wysłanie
   // (np. dwa kliknięcia albo ponowienie po zerwanym połączeniu) nie tworzy duplikatu.
   // Sprawdzenie w tej samej transakcji co zapis, więc dwa równoległe żądania też nie przejdą.
-  const duplicateId = db.transaction((tx) => {
+  // Aparat o tej samej specyfikacji, który jest już zatwierdzony, też nie jest zapisywany ponownie.
+  const conflict = db.transaction((tx) => {
     const dup = tx.select({ id: camera.id }).from(camera).where(and(
       eq(camera.submitterId, user.id), eq(camera.smartphoneId, smartphoneId),
       eq(camera.type, newCamera.type), eq(camera.facing, newCamera.facing), eq(camera.status, "pending"),
     )).limit(1).all()[0];
-    if (dup) return dup.id;
+    if (dup) return { code: "DUPLICATE_SUBMISSION" as const, id: dup.id };
+    const twin = approvedTwin(tx, newCamera);
+    if (twin) return { code: "CAMERA_EXISTS" as const, id: twin };
     tx.insert(camera).values(newCamera).run();
     if (modes.data.length) {
       tx.insert(cameraVideoMode).values(
@@ -105,9 +109,12 @@ camerasRouter.post("/", requireAuth, async (c) => {
     }
     return null;
   });
-  if (duplicateId) {
+  if (conflict?.code === "DUPLICATE_SUBMISSION") {
     return fail(c, 409, "DUPLICATE_SUBMISSION",
-      "You already have a pending submission for this camera on this smartphone", { cameraId: duplicateId });
+      "You already have a pending submission for this camera on this smartphone", { cameraId: conflict.id });
+  }
+  if (conflict?.code === "CAMERA_EXISTS") {
+    return fail(c, 409, "CAMERA_EXISTS", "This camera is already in the catalogue", { cameraId: conflict.id });
   }
 
   return c.json(await withSamples(newCamera), 201);
@@ -161,6 +168,12 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
     status, reviewedBy: user.id, reviewedAt: new Date(),
   };
 
+  // Rozpatrzyć można tylko oczekujące zgłoszenie. Gdy dwóch moderatorów kliknie jednocześnie,
+  // drugi dostaje 409 zamiast nadpisać decyzję pierwszego (i drugiego powiadomienia).
+  if (existing.status !== "pending") {
+    return fail(c, 409, "ALREADY_REVIEWED", "This submission has already been reviewed", { status: existing.status });
+  }
+
   if (status === "approved") {
     const changes: Record<string, unknown> = {};
     for (const k of SPEC_KEYS) if (k in body) changes[k] = body[k];
@@ -172,7 +185,27 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
     // nie wymaga zdjęć (np. dane z oficjalnej specyfikacji producenta).
   }
 
-  await db.update(camera).set(updates).where(eq(camera.id, id));
+  // Zapis warunkowy (status nadal "pending") i sprawdzenie klona w jednej transakcji.
+  const outcome = db.transaction((tx) => {
+    if (status === "approved") {
+      const twin = approvedTwin(tx, { ...existing, ...updates } as Parameters<typeof approvedTwin>[1], id);
+      if (twin) return { error: "CAMERA_EXISTS" as const, id: twin };
+    }
+    const changed = tx.update(camera).set(updates)
+      .where(and(eq(camera.id, id), eq(camera.status, "pending"))).run().changes;
+    if (changed === 0) {
+      const now = tx.select({ status: camera.status }).from(camera).where(eq(camera.id, id)).all()[0];
+      return { error: "ALREADY_REVIEWED" as const, status: now?.status ?? null };
+    }
+    return null;
+  });
+  if (outcome?.error === "CAMERA_EXISTS") {
+    return fail(c, 409, "CAMERA_EXISTS",
+      "An identical camera is already approved for this smartphone - reject this submission instead", { cameraId: outcome.id });
+  }
+  if (outcome?.error === "ALREADY_REVIEWED") {
+    return fail(c, 409, "ALREADY_REVIEWED", "This submission has already been reviewed", { status: outcome.status });
+  }
   await notify(existing.submitterId, "camera_reviewed", {
     cameraId: id, smartphoneId: existing.smartphoneId, status,
   });

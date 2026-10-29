@@ -1,6 +1,7 @@
 import { db } from "../db/index.js";
 import { camera } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { approvedTwin } from "./cameraTwins.js";
 
 const MIN_SUBMISSIONS = 3;
 const OUTLIER_THRESHOLD = 0.20;
@@ -101,18 +102,20 @@ async function aggregateGroup(rows: CameraRow[]) {
     );
     const winner = sorted[0]!;
 
-    tx.update(camera)
+    // Taki aparat jest już zatwierdzony (np. moderator zrobił to ręcznie) - zgłoszenia są zbędne.
+    const twin = approvedTwin(tx, { ...winner, ...consensusNumeric } as Parameters<typeof approvedTwin>[1]);
+    const changed = twin ? 0 : tx.update(camera)
       .set({
         status: "approved", reviewedAt: new Date(), reviewedBy: null,
         ...consensusNumeric, ...consensusDiscrete,
       })
-      .where(eq(camera.id, winner.id)).run();
+      .where(and(eq(camera.id, winner.id), eq(camera.status, "pending"))).run().changes;
 
-    const losers = sorted.filter(r => r.id !== winner.id);
+    const losers = changed ? sorted.filter(r => r.id !== winner.id) : sorted;
     for (const row of losers) {
       tx.update(camera)
         .set({ status: "rejected", reviewedAt: new Date(), reviewedBy: null })
-        .where(eq(camera.id, row.id)).run();
+        .where(and(eq(camera.id, row.id), eq(camera.status, "pending"))).run();
     }
   });
 }
