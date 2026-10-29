@@ -40,7 +40,8 @@ mediaRouter.get("/private/:bucket/*", async (c) => {
   const headers: Record<string, string> = {
     "Content-Type": type,
     "Accept-Ranges": "bytes",
-    "Cache-Control": "private, no-store",
+    // link jest stały do czasu `exp`, więc przeglądarka/aplikacja może trzymać plik w cache do tego momentu
+    "Cache-Control": `private, max-age=${Math.max(0, exp - Math.floor(Date.now() / 1000))}`,
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'",
   };

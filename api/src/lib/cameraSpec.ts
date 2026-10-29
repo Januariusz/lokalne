@@ -1,4 +1,4 @@
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { photo } from "../db/schema.js";
 
@@ -22,6 +22,7 @@ export type CameraSpec = {
   opticalZoom: boolean;
   focalLengthMaxMm: number | null;
   sensorFormat: string | null;
+  sensorDenominator: number | null;
   photoWidthPx: number | null;
   photoHeightPx: number | null;
   aspectRatio: string | null;
@@ -34,6 +35,16 @@ const SENSOR_FORMAT_RE = /^(1\/\d+(\.\d+)?|\d+(\.\d+)?)$/;
 const ASPECT_RATIO_RE = /^\d+(\.\d+)?:\d+(\.\d+)?$/;
 const NOTE_MAX = 500;
 const PHOTO_PX_MAX = 30000;
+
+/**
+ * Mianownik rozmiaru matrycy do porównań liczbowych: "1/1.28" -> 1.28, "1" -> 1, "1.5" -> 0.6667.
+ * Większa wartość = mniejsza matryca. null, gdy format jest pusty albo niepoprawny.
+ */
+export function sensorDenominatorOf(format: string | null | undefined): number | null {
+  if (!format || !SENSOR_FORMAT_RE.test(format)) return null;
+  const v = format.startsWith("1/") ? Number(format.slice(2)) : 1 / Number(format);
+  return Number.isFinite(v) && v > 0 ? Math.round(v * 10000) / 10000 : null;
+}
 
 /** Pole tekstowe opcjonalne: brak / null / "" => null; inaczej string po trim(). */
 function optText(v: unknown): { ok: true; value: string | null } | { ok: false } {
@@ -172,6 +183,7 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
       opticalZoom,
       focalLengthMaxMm,
       sensorFormat: sf.value,
+      sensorDenominator: sensorDenominatorOf(sf.value),
       photoWidthPx,
       photoHeightPx,
       aspectRatio: ar.value,
@@ -201,15 +213,9 @@ export function validateVideoModes(input: unknown): { ok: true; data: VideoModeI
 
 const MIN_SAMPLE_VALUES = 2;
 
-/**
- * Aparat ze zmienną przysłoną / zoomem optycznym wymaga zdjęć wykonanych przy co najmniej
- * dwóch różnych wartościach (przysłona i/lub ogniskowa z EXIF). Liczą się zdjęcia niepodlegające usunięciu.
- */
-export async function sampleCoverage(
-  cameraId: string, flags: { variableAperture: boolean; opticalZoom: boolean },
-) {
-  const rows = await db.select({ a: photo.exifAperture, f: photo.exifFocalLength })
-    .from(photo).where(and(eq(photo.cameraId, cameraId), ne(photo.status, "deleted")));
+type SampleRow = { a: number | null; f: number | null };
+
+function coverageOf(rows: SampleRow[], flags: { variableAperture: boolean; opticalZoom: boolean }) {
   const apertureValues = new Set(rows.filter(r => r.a !== null).map(r => Math.round(r.a! * 100)));
   const focalLengthValues = new Set(rows.filter(r => r.f !== null).map(r => Math.round(r.f! * 10)));
   const satisfied =
@@ -223,4 +229,27 @@ export async function sampleCoverage(
     focalLengthValues: focalLengthValues.size,
     satisfied,
   };
+}
+
+/** Pokrycie próbkami dla wielu aparatów jednym zapytaniem (listy /mine, /pending). */
+export async function sampleCoverageMany<T extends { id: string; variableAperture: boolean; opticalZoom: boolean }>(cams: T[]) {
+  const byCam = new Map<string, SampleRow[]>();
+  if (cams.length > 0) {
+    const rows = await db.select({ cameraId: photo.cameraId, a: photo.exifAperture, f: photo.exifFocalLength })
+      .from(photo).where(and(inArray(photo.cameraId, cams.map((c) => c.id)), ne(photo.status, "deleted")));
+    for (const r of rows) byCam.set(r.cameraId, [...(byCam.get(r.cameraId) ?? []), r]);
+  }
+  return new Map(cams.map((c) => [c.id, coverageOf(byCam.get(c.id) ?? [], c)]));
+}
+
+/**
+ * Aparat ze zmienną przysłoną / zoomem optycznym wymaga zdjęć wykonanych przy co najmniej
+ * dwóch różnych wartościach (przysłona i/lub ogniskowa z EXIF). Liczą się zdjęcia niepodlegające usunięciu.
+ */
+export async function sampleCoverage(
+  cameraId: string, flags: { variableAperture: boolean; opticalZoom: boolean },
+) {
+  const rows = await db.select({ a: photo.exifAperture, f: photo.exifFocalLength })
+    .from(photo).where(and(eq(photo.cameraId, cameraId), ne(photo.status, "deleted")));
+  return coverageOf(rows, flags);
 }

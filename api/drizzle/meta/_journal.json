@@ -22,6 +22,13 @@
       "when": 1793042603533,
       "tag": "0002_camera_extra_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793270320231,
+      "tag": "0003_perf_build_models",
+      "breakpoints": true
     }
   ]
 }

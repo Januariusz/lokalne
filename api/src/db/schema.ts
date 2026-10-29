@@ -92,7 +92,21 @@ export const smartphone = sqliteTable("smartphone", {
 }, (t) => [
   index("idx_smartphone_brand").on(t.brandId),
   index("idx_smartphone_added_by").on(t.addedBy),
+  // sortowanie listy: nazwa bez rozróżniania wielkości liter / popularne / nowe
+  index("idx_smartphone_name_nocase").on(sql`${t.modelName} COLLATE NOCASE`, t.id),
+  index("idx_smartphone_trending").on(sql`${t.viewCount} DESC`, sql`${t.createdAt} DESC`, t.id),
+  index("idx_smartphone_new").on(sql`${t.releaseDate} DESC`, sql`${t.createdAt} DESC`, t.id),
 ]);
+
+// Kody modelu zgłaszane przez urządzenie (Android: Build.MODEL, np. "SM-S928B"; iOS: "iPhone16,1").
+// Jeden telefon z katalogu ma zwykle kilka kodów (warianty regionalne), a każdy kod należy do jednego telefonu.
+// build_model_key = kod małymi literami bez spacji na brzegach (unikalny, wyszukiwanie bez wielkości liter).
+export const smartphoneBuildModel = sqliteTable("smartphone_build_model", {
+  buildModelKey: text("build_model_key", { length: 128 }).primaryKey(),
+  buildModel: text("build_model", { length: 128 }).notNull(),
+  smartphoneId: text("smartphone_id").notNull().references(() => smartphone.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+}, (t) => [index("idx_build_model_smartphone").on(t.smartphoneId)]);
 
 export const camera = sqliteTable("camera", {
   id: text("id").primaryKey(),
@@ -123,10 +137,13 @@ export const camera = sqliteTable("camera", {
   photoHeightPx: integer("photo_height_px"),
   aspectRatio: text("aspect_ratio", { length: 16 }),  // proporcje matrycy, np. "4:3", "1:1"
   note: text("note", { length: 500 }),                // notatka moderatora o nietypowym aparacie (przypis pod specyfikacją)
+  // mianownik rozmiaru matrycy wyliczany z sensorFormat ("1/1.28" -> 1.28, "1" -> 1) - do filtrowania
+  sensorDenominator: real("sensor_denominator"),
 }, (t) => [
   index("idx_camera_smartphone").on(t.smartphoneId),
   index("idx_camera_submitter").on(t.submitterId),
   index("idx_camera_status").on(t.status),
+  index("idx_camera_phone_status").on(t.smartphoneId, t.status),
 ]);
 
 export const cameraVideoMode = sqliteTable("camera_video_mode", {
@@ -154,6 +171,7 @@ export const photo = sqliteTable("photo", {
 }, (t) => [
   index("idx_photo_camera").on(t.cameraId),
   index("idx_photo_uploader").on(t.uploaderId),
+  index("idx_photo_camera_status_date").on(t.cameraId, t.status, sql`${t.uploadDate} DESC`),
 ]);
 
 export const video = sqliteTable("video", {
@@ -169,6 +187,7 @@ export const video = sqliteTable("video", {
 }, (t) => [
   index("idx_video_camera").on(t.cameraId),
   index("idx_video_uploader").on(t.uploaderId),
+  index("idx_video_camera_status_date").on(t.cameraId, t.status, sql`${t.uploadDate} DESC`),
 ]);
 
 export const review = sqliteTable("review", {
@@ -183,6 +202,8 @@ export const review = sqliteTable("review", {
 }, (t) => [
   index("idx_review_author").on(t.authorId),
   index("idx_review_smartphone").on(t.smartphoneId),
+  index("idx_review_phone_status_upd").on(t.smartphoneId, t.status, sql`${t.updatedAt} DESC`),
+  index("idx_review_author_upd").on(t.authorId, sql`${t.updatedAt} DESC`),
 ]);
 
 export const reviewMedia = sqliteTable("review_media", {

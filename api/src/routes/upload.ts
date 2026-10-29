@@ -6,11 +6,14 @@ import { photo, video, camera } from "../db/schema.js";
 import { requireAuth, requireRole } from "../middleware/requireAuth.js";
 import {
   storeFile, TMP_DIR, storageUrl, type Visibility, publicUrl, mediaUrl, deleteStoredObject, BUCKETS, type BucketName,
+  variantUrl,
 } from "../lib/storage.js";
 import { fail } from "../lib/errors.js";
 import { parseMultipartUpload, UploadError, type ParsedUpload } from "../lib/multipart.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
+import { sniffFile, stripMetadataInPlace, downscaleInPlace, runImageJob } from "../lib/images.js";
+import { ensureVariants } from "../services/mediaVariants.js";
 
 const uploadRouter = new Hono<{ Variables: HonoVariables }>();
 type Ctx = Context<{ Variables: HonoVariables }>;
@@ -45,12 +48,6 @@ async function receive(c: Ctx, maxFileBytes: number, required: string[]) {
   }
 }
 
-/** Typ MIME z multipart; "text/plain" to domyślna wartość busboy, gdy klient nie podał typu. */
-function mimeOr(upload: ParsedUpload, fallback: string): string {
-  const m = upload.file.mimeType;
-  return m && m !== "text/plain" ? m : fallback;
-}
-
 function optionalNumber(fields: Record<string, string>, key: string): number | null {
   const raw = fields[key];
   if (raw === undefined || raw.trim() === "") return null;
@@ -63,11 +60,9 @@ function optionalNumber(fields: Record<string, string>, key: string): number | n
  * weryfikacji (moderator) albo opublikowaniu recenzji. Obrazy urządzeń (moderator) są od razu publiczne.
  */
 async function putFile(
-  bucket: BucketName, objectKey: string, upload: ParsedUpload, mimeType: string,
-  visibility: Visibility = "private",
+  bucket: BucketName, objectKey: string, upload: ParsedUpload, visibility: Visibility = "private",
 ) {
-  // mimeType nie jest zapisywany: Caddy ustala Content-Type po rozszerzeniu pliku.
-  void mimeType;
+  // Caddy ustala Content-Type po rozszerzeniu pliku, a rozszerzenie pochodzi z rozpoznanej zawartości.
   await storeFile(bucket, objectKey, upload.file.path, visibility);
 }
 
@@ -79,6 +74,13 @@ async function removeOrphan(url: string) {
     console.error("[upload] could not remove orphaned object:", err);
   }
 }
+
+const REVIEW_IMAGE_MAX = 15 * 1024 * 1024; // obrazy w recenzjach (filmy mają limit VIDEO_MAX)
+const REVIEW_IMAGE_SIDE = 2048;            // dłuższy bok obrazu w recenzji po zmniejszeniu
+const DEVICE_IMAGE_SIDE = 1600;            // dłuższy bok zdjęcia telefonu w katalogu
+
+const unsupported = (c: Ctx, what: string) =>
+  fail(c, 400, "UNSUPPORTED_MEDIA_TYPE", `Unsupported file type. Accepted: ${what}`);
 
 uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
   const user = c.get("user");
@@ -98,14 +100,16 @@ uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
     const cam = await db.select({ id: camera.id }).from(camera).where(eq(camera.id, cameraId));
     if (!cam[0]) return fail(c, 404, "CAMERA_NOT_FOUND", "Camera not found");
 
-    const mimeType = mimeOr(upload, "image/jpeg");
-    const ext = mimeType === "image/png" ? "png"
-              : mimeType === "image/webp" ? "webp"
-              : "jpg";
-    const objectKey = `${cameraId}/${randomUUID()}.${ext}`;
-    const stored = storageUrl(BUCKETS.photos, objectKey);
+    // typ pliku z jego zawartości, nie z nagłówka klienta
+    const type = await sniffFile(upload.file.path);
+    if (!type || type.kind !== "image") return unsupported(c, "JPEG, PNG, WebP, GIF, HEIC, AVIF");
 
-    await putFile(BUCKETS.photos, objectKey, upload, mimeType);
+    // EXIF z lokalizacją GPS nie trafia na serwer (dane EXIF zostają w polach exif* rekordu)
+    await stripMetadataInPlace(upload.file.path, type.ext);
+
+    const objectKey = `${cameraId}/${randomUUID()}.${type.ext}`;
+    const stored = storageUrl(BUCKETS.photos, objectKey);
+    await putFile(BUCKETS.photos, objectKey, upload);
 
     const newPhoto = {
       id:               randomUUID(),
@@ -128,7 +132,11 @@ uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
       await removeOrphan(stored);
       throw err;
     }
-    return c.json({ id: newPhoto.id, status: "pending", objectKey }, 201);
+    await ensureVariants(BUCKETS.photos, objectKey, "photo");
+    return c.json({
+      id: newPhoto.id, status: "pending", objectKey,
+      thumbUrl: variantUrl(stored, "w480", false),
+    }, 201);
   } finally {
     await upload.cleanup();
   }
@@ -153,14 +161,13 @@ uploadRouter.post("/video/upload", requireAuth, videoLimit, async (c) => {
     const cam = await db.select({ id: camera.id }).from(camera).where(eq(camera.id, cameraId));
     if (!cam[0]) return fail(c, 404, "CAMERA_NOT_FOUND", "Camera not found");
 
-    const mimeType = mimeOr(upload, "video/mp4");
-    const ext = mimeType.includes("quicktime") ? "mov"
-              : mimeType.includes("webm") ? "webm"
-              : "mp4";
-    const objectKey = `${cameraId}/${randomUUID()}.${ext}`;
+    const type = await sniffFile(upload.file.path);
+    if (!type || type.kind !== "video") return unsupported(c, "MP4, MOV, WebM");
+
+    const objectKey = `${cameraId}/${randomUUID()}.${type.ext}`;
     const stored = storageUrl(BUCKETS.videos, objectKey);
 
-    await putFile(BUCKETS.videos, objectKey, upload, mimeType);
+    await putFile(BUCKETS.videos, objectKey, upload);
 
     const newVideo = {
       id:         randomUUID(),
@@ -186,43 +193,67 @@ uploadRouter.post("/video/upload", requireAuth, videoLimit, async (c) => {
   }
 });
 
-uploadRouter.post("/review-media/upload", requireAuth, photoLimit, async (c) => {
-  const r = await receive(c, PHOTO_MAX, []);
+// Obraz albo film do recenzji. Obraz: maks. 15 MB, zmniejszany do 2048 px i zapisywany bez metadanych.
+uploadRouter.post("/review-media/upload", requireAuth, videoLimit, async (c) => {
+  const r = await receive(c, VIDEO_MAX, []);
   if ("error" in r) return r.error;
   const { upload } = r;
 
   try {
-    const mimeType = mimeOr(upload, "image/jpeg");
-    const ext = mimeType.includes("png") ? "png"
-              : mimeType.includes("webp") ? "webp"
-              : mimeType.includes("mov") ? "mov"
-              : mimeType.includes("webm") ? "webm"
-              : mimeType.includes("video") ? "mp4" : "jpg";
+    const type = await sniffFile(upload.file.path);
+    if (!type) return unsupported(c, "JPEG, PNG, WebP, GIF, HEIC, AVIF, MP4, MOV, WebM");
 
-    const objectKey = `${randomUUID()}.${ext}`;
-    await putFile(BUCKETS.reviewMedia, objectKey, upload, mimeType);
+    let dims: { width: number; height: number } | null = null;
+    if (type.kind === "image") {
+      if (upload.file.size > REVIEW_IMAGE_MAX) {
+        return fail(c, 413, "FILE_TOO_LARGE", "Review image is too large (max 15 MB)");
+      }
+      await stripMetadataInPlace(upload.file.path, type.ext);
+      dims = await runImageJob(() => downscaleInPlace(upload.file.path, type.ext, REVIEW_IMAGE_SIDE));
+    }
 
+    const objectKey = `${randomUUID()}.${type.ext}`;
+    await putFile(BUCKETS.reviewMedia, objectKey, upload);
     const stored = storageUrl(BUCKETS.reviewMedia, objectKey);
+    if (type.kind === "image") await ensureVariants(BUCKETS.reviewMedia, objectKey, "review");
+
     // plik jest prywatny do czasu opublikowania recenzji; autor dostaje podpisany link do podglądu
-    return c.json({ objectKey, storageUrl: stored, url: mediaUrl(stored, false) }, 201);
+    return c.json({
+      objectKey,
+      storageUrl: stored,
+      url: mediaUrl(stored, false),
+      type: type.kind === "image" ? "photo" : "video",
+      widthPx: dims?.width ?? null,
+      heightPx: dims?.height ?? null,
+      thumbUrl: variantUrl(stored, "w480", false),
+    }, 201);
   } finally {
     await upload.cleanup();
   }
 });
 
+// Zdjęcie telefonu do katalogu (moderator): zmniejszane do 1600 px, bez metadanych, z miniaturą 512 px.
 uploadRouter.post("/device-image/upload", requireRole("moderator"), photoLimit, async (c) => {
   const r = await receive(c, PHOTO_MAX, []);
   if ("error" in r) return r.error;
   const { upload } = r;
 
   try {
-    const mimeType = mimeOr(upload, "image/jpeg");
-    const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
-    const objectKey = `${randomUUID()}.${ext}`;
-    await putFile(BUCKETS.deviceImages, objectKey, upload, mimeType, "public");
+    const type = await sniffFile(upload.file.path);
+    if (!type || type.kind !== "image" || type.ext === "heic") return unsupported(c, "JPEG, PNG, WebP, GIF, AVIF");
 
+    await stripMetadataInPlace(upload.file.path, type.ext);
+    await runImageJob(() => downscaleInPlace(upload.file.path, type.ext, DEVICE_IMAGE_SIDE));
+
+    const objectKey = `${randomUUID()}.${type.ext}`;
+    await putFile(BUCKETS.deviceImages, objectKey, upload, "public");
     const stored = storageUrl(BUCKETS.deviceImages, objectKey);
-    return c.json({ objectKey, storageUrl: stored, url: publicUrl(stored) }, 201);
+    await ensureVariants(BUCKETS.deviceImages, objectKey, "device");
+
+    return c.json({
+      objectKey, storageUrl: stored, url: publicUrl(stored),
+      imageThumbUrl: variantUrl(stored, "w512", true),
+    }, 201);
   } finally {
     await upload.cleanup();
   }

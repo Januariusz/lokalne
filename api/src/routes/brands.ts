@@ -1,7 +1,8 @@
 import { Hono } from "hono";
+import { etag } from "hono/etag";
 import { db } from "../db/index.js";
 import { brand } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { eq, asc, sql } from "drizzle-orm";
 import { requireRole } from "../middleware/requireAuth.js";
 import { publicUrl } from "../lib/storage.js";
 import { fail } from "../lib/errors.js";
@@ -9,15 +10,21 @@ import { randomUUID } from "node:crypto";
 
 const brandsRouter = new Hono();
 
-brandsRouter.get("/", async (c) => {
-  const rows = await db.select().from(brand).orderBy(brand.name);
+// Marki zmieniają się rzadko: klient może je trzymać 5 minut, a potem odświeżyć w tle (ETag -> 304).
+const BRANDS_CACHE = "public, max-age=300, stale-while-revalidate=3600";
+
+// Kolejność alfabetyczna bez rozróżniania wielkości liter ("realme" obok "Redmi", nie na końcu).
+brandsRouter.get("/", etag({ weak: true }), async (c) => {
+  const rows = await db.select().from(brand).orderBy(sql`${brand.name} COLLATE NOCASE`, asc(brand.id));
+  c.header("Cache-Control", BRANDS_CACHE);
   return c.json(rows.map((r) => ({ ...r, logoUrl: publicUrl(r.logoUrl) })));
 });
 
-brandsRouter.get("/:id", async (c) => {
+brandsRouter.get("/:id", etag({ weak: true }), async (c) => {
   const id = c.req.param("id") as string;
   const row = await db.select().from(brand).where(eq(brand.id, id));
   if (!row[0]) return fail(c, 404, "NOT_FOUND", "Not found");
+  c.header("Cache-Control", BRANDS_CACHE);
   return c.json({ ...row[0], logoUrl: publicUrl(row[0].logoUrl) });
 });
 

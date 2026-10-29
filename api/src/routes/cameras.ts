@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { db } from "../db/index.js";
 import { camera, cameraVideoMode, smartphone } from "../db/schema.js";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, asc } from "drizzle-orm";
 import { requireAuth, requireRole, hasRole } from "../middleware/requireAuth.js";
 import { fail } from "../lib/errors.js";
 import { notify } from "../lib/notifications.js";
-import { validateCameraSpec, validateVideoModes, sampleCoverage } from "../lib/cameraSpec.js";
+import { validateCameraSpec, validateVideoModes, sampleCoverage, sampleCoverageMany } from "../lib/cameraSpec.js";
+import { phoneSummaries, videoModesOf } from "../services/phones.js";
 import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
@@ -22,6 +23,13 @@ async function withSamples<T extends { id: string; variableAperture: boolean; op
   return { ...row, samples: await sampleCoverage(row.id, row) };
 }
 
+/** Lista zgłoszeń z pokryciem próbkami i krótkim opisem telefonu (nazwa, marka, zdjęcie) - zbiorczo. */
+async function decorateList<T extends { id: string; smartphoneId: string; variableAperture: boolean; opticalZoom: boolean }>(rows: T[]) {
+  const samples = await sampleCoverageMany(rows);
+  const phones = await phoneSummaries(rows.map((r) => r.smartphoneId));
+  return rows.map((r) => ({ ...r, samples: samples.get(r.id)!, phone: phones.get(r.smartphoneId) ?? null }));
+}
+
 camerasRouter.get("/", async (c) => {
   const smartphoneId = c.req.query("smartphone_id");
   if (!smartphoneId) return fail(c, 400, "SMARTPHONE_ID_REQUIRED", "smartphone_id is required");
@@ -29,26 +37,22 @@ camerasRouter.get("/", async (c) => {
   const rows = await db.select().from(camera)
     .where(and(eq(camera.smartphoneId, smartphoneId), eq(camera.status, "approved")));
 
-  const withModes = await Promise.all(rows.map(async (cam) => {
-    const modes = await db.select().from(cameraVideoMode).where(eq(cameraVideoMode.cameraId, cam.id));
-    return { ...cam, videoModes: modes };
-  }));
-
-  return c.json(withModes);
+  const modes = await videoModesOf(rows.map((r) => r.id));
+  return c.json(rows.map((cam) => ({ ...cam, videoModes: modes.get(cam.id) ?? [] })));
 });
 
 // Zgłoszenia zalogowanego użytkownika wraz ze statusem rozpatrzenia (BPMN 2.4).
 camerasRouter.get("/mine", requireAuth, async (c) => {
   const user = c.get("user");
   const rows = await db.select().from(camera)
-    .where(eq(camera.submitterId, user.id)).orderBy(desc(camera.submittedAt));
-  return c.json(await Promise.all(rows.map(withSamples)));
+    .where(eq(camera.submitterId, user.id)).orderBy(desc(camera.submittedAt), desc(camera.id));
+  return c.json(await decorateList(rows));
 });
 
 camerasRouter.get("/pending", requireRole("moderator"), async (c) => {
   const rows = await db.select().from(camera).where(eq(camera.status, "pending"))
-    .orderBy(camera.submittedAt);
-  return c.json(await Promise.all(rows.map(withSamples)));
+    .orderBy(asc(camera.submittedAt), asc(camera.id));
+  return c.json(await decorateList(rows));
 });
 
 camerasRouter.post("/", requireAuth, async (c) => {

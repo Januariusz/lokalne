@@ -1,11 +1,13 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { etag } from "hono/etag";
 import { db } from "../db/index.js";
 import { review, reviewMedia, reviewComment, reviewLike, smartphone, user } from "../db/schema.js";
-import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, sql, type SQL } from "drizzle-orm";
 import { requireAuth, requireRole, hasRole, optionalUser } from "../middleware/requireAuth.js";
 import {
-  storageUrl, objectExists, mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl, BUCKETS,
+  storageUrl, objectExists, mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl, BUCKETS, variantUrl,
 } from "../lib/storage.js";
+import { phoneSummaries } from "../services/phones.js";
 import { fail } from "../lib/errors.js";
 import { notify } from "../lib/notifications.js";
 import type { HonoVariables } from "../types/honoTypes.js";
@@ -35,8 +37,32 @@ async function syncMediaVisibility(reviewId: string, status: ReviewStatus) {
 
 type ReviewRow = typeof review.$inferSelect;
 
-/** Dokłada autora, liczniki lajków/komentarzy, flagę likedByMe i media (z właściwymi linkami). */
-async function decorate(rows: ReviewRow[], viewerId: string | null) {
+/** Tekst recenzji bez znaczników Markdown, skrócony do ok. 200 znaków (podgląd na liście). */
+export function markdownExcerpt(md: string, max = 200): string {
+  const text = md
+    .replace(/```[\s\S]*?```/g, " ")              // bloki kodu
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")        // obrazy
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")      // linki -> sam tekst
+    .replace(/<[^>]+>/g, " ")                      // HTML
+    .replace(/`([^`]*)`/g, "$1")                   // kod w linii
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "") // nagłówki, cytaty, listy
+    .replace(/(\*\*|__|\*|_|~~)/g, "")              // pogrubienia, kursywa, przekreślenia
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+type DecorateOpts = { summary?: boolean };
+
+/**
+ * Dokłada autora, telefon (nazwa, marka, zdjęcie), liczniki lajków/komentarzy, flagę likedByMe
+ * i media (z właściwymi linkami i miniaturami). Tryb `summary`: zamiast pełnej treści i mediów
+ * zwraca excerpt, coverUrl i mediaCount (lista recenzji nie potrzebuje całego tekstu).
+ */
+async function decorate(rows: ReviewRow[], viewerId: string | null, opts: DecorateOpts = {}) {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
 
@@ -59,18 +85,72 @@ async function decorate(rows: ReviewRow[], viewerId: string | null) {
       : [],
   );
   const media = await db.select().from(reviewMedia).where(inArray(reviewMedia.reviewId, ids));
+  const phones = await phoneSummaries(rows.map((r) => r.smartphoneId));
 
-  return rows.map((r) => ({
-    ...r,
-    authorName:   authors.get(r.authorId) ?? null,
-    likeCount:    likes.get(r.id) ?? 0,
-    commentCount: comments.get(r.id) ?? 0,
-    likedByMe:    liked.has(r.id),
-    media: media.filter((m) => m.reviewId === r.id)
+  return rows.map((r) => {
+    const isPublic = r.status === "published";
+    const items = media.filter((m) => m.reviewId === r.id)
       .sort((a, b) => a.displayOrder - b.displayOrder)
-      .map((m) => ({ ...m, url: mediaUrl(m.storageUrl, r.status === "published") })),
-  }));
+      .map((m) => ({
+        ...m,
+        url: mediaUrl(m.storageUrl, isPublic),
+        thumbUrl: m.type === "photo" ? variantUrl(m.storageUrl, "w480", isPublic) : null,
+      }));
+    const base = {
+      ...r,
+      authorName:   authors.get(r.authorId) ?? null,
+      likeCount:    likes.get(r.id) ?? 0,
+      commentCount: comments.get(r.id) ?? 0,
+      likedByMe:    liked.has(r.id),
+      phone:        phones.get(r.smartphoneId) ?? null,
+    };
+    if (!opts.summary) return { ...base, media: items };
+    const { contentMarkdown, ...rest } = base;
+    const cover = items.find((m) => m.type === "photo");
+    return {
+      ...rest,
+      excerpt:    markdownExcerpt(contentMarkdown),
+      coverUrl:   cover ? (cover.thumbUrl ?? cover.url) : null,
+      mediaCount: items.length,
+    };
+  });
 }
+
+type Ctx = Context<{ Variables: HonoVariables }>;
+
+/**
+ * Wspólna obsługa list recenzji:
+ *   summary=1        - bez pełnej treści i mediów (excerpt, coverUrl, mediaCount)
+ *   page / limit     - stronicowanie (limit domyślnie 20, maks. 50); gdy podany którykolwiek,
+ *                      odpowiedź ma postać { data, page, limit, total }, inaczej zwykła tablica
+ */
+async function reviewList(c: Ctx, where: SQL, order: SQL[], viewerId: string | null) {
+  const summary = c.req.query("summary") === "1" || c.req.query("summary") === "true";
+  const paged = c.req.query("page") !== undefined || c.req.query("limit") !== undefined;
+  const pageRaw = parseInt(c.req.query("page") ?? "1", 10);
+  const limitRaw = parseInt(c.req.query("limit") ?? "20", 10);
+  const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
+  const limit = Number.isFinite(limitRaw) ? Math.min(50, Math.max(1, limitRaw)) : 20;
+
+  let q = db.select().from(review).where(where).orderBy(...order).$dynamic();
+  if (paged) q = q.limit(limit).offset((page - 1) * limit);
+  const rows = await q;
+  const data = await decorate(rows, viewerId, { summary });
+  if (!paged) return c.json(data);
+  const total = (await db.select({ n: sql<number>`count(*)` }).from(review).where(where))[0]?.n ?? 0;
+  return c.json({ data, page, limit, total });
+}
+
+// Dane zależne od oglądającego (likedByMe, prywatne recenzje): tylko prywatny cache z potwierdzeniem.
+// ETag pozwala odpowiedzieć 304, gdy nic się nie zmieniło (liczony z treści, więc obejmuje też lajki).
+reviewsRouter.use("*", async (c, next) => {
+  await next();
+  if (c.req.method === "GET") {
+    c.header("Cache-Control", "private, no-cache");
+    c.header("Vary", "Authorization", { append: true });
+  }
+});
+reviewsRouter.get("*", etag({ weak: true }));
 
 function canSeeUnpublished(u: { id: string; role?: string } | null, row: ReviewRow): boolean {
   if (!u) return false;
@@ -80,24 +160,17 @@ function canSeeUnpublished(u: { id: string; role?: string } | null, row: ReviewR
 }
 
 // Dashboard moderatora: recenzje czekające na weryfikację.
-reviewsRouter.get("/pending", requireRole("moderator"), async (c) => {
-  const rows = await db.select().from(review).where(eq(review.status, "pending")).orderBy(asc(review.updatedAt));
-  return c.json(await decorate(rows, c.get("user").id));
-});
+reviewsRouter.get("/pending", requireRole("moderator"), async (c) =>
+  reviewList(c, eq(review.status, "pending"), [asc(review.updatedAt), asc(review.id)], c.get("user").id));
 
 // Panel administratora: ukryte recenzje ("Hidden reviews").
-reviewsRouter.get("/hidden", requireRole("admin"), async (c) => {
-  const rows = await db.select().from(review).where(eq(review.status, "hidden")).orderBy(desc(review.updatedAt));
-  return c.json(await decorate(rows, c.get("user").id));
-});
+reviewsRouter.get("/hidden", requireRole("admin"), async (c) =>
+  reviewList(c, eq(review.status, "hidden"), [desc(review.updatedAt), desc(review.id)], c.get("user").id));
 
 // Własne recenzje autora (wszystkie statusy), np. do ekranu edycji.
 reviewsRouter.get("/mine", requireAuth, async (c) => {
   const u = c.get("user");
-  const rows = await db.select().from(review)
-    .where(eq(review.authorId, u.id))
-    .orderBy(desc(review.updatedAt));
-  return c.json(await decorate(rows, u.id));
+  return reviewList(c, eq(review.authorId, u.id), [desc(review.updatedAt), desc(review.id)], u.id);
 });
 
 reviewsRouter.get("/", async (c) => {
@@ -105,11 +178,8 @@ reviewsRouter.get("/", async (c) => {
   if (!smartphoneId) return fail(c, 400, "SMARTPHONE_ID_REQUIRED", "smartphone_id is required");
 
   const viewer = await optionalUser(c);
-  const rows = await db.select().from(review)
-    .where(and(eq(review.smartphoneId, smartphoneId), eq(review.status, "published")))
-    .orderBy(desc(review.updatedAt));
-
-  return c.json(await decorate(rows, viewer?.id ?? null));
+  return reviewList(c, and(eq(review.smartphoneId, smartphoneId), eq(review.status, "published"))!,
+    [desc(review.updatedAt), desc(review.id)], viewer?.id ?? null);
 });
 
 // Komentarz usuwa autor komentarza albo administrator.
@@ -133,7 +203,14 @@ reviewsRouter.get("/:id", async (c) => {
     return fail(c, 404, "NOT_FOUND", "Not found");
   }
 
-  return c.json((await decorate([row], viewer?.id ?? null))[0]);
+  const item = (await decorate([row], viewer?.id ?? null))[0]!;
+  // ?include=comments&comment_limit=20 - pierwsza strona komentarzy w tej samej odpowiedzi
+  if (c.req.query("include") === "comments" && row.status === "published") {
+    const lim = parseInt(c.req.query("comment_limit") ?? "20", 10);
+    const limit = Number.isFinite(lim) ? Math.min(100, Math.max(1, lim)) : 20;
+    return c.json({ ...item, comments: await commentPage(id, 1, limit) });
+  }
+  return c.json(item);
 });
 
 // ── Komentarze ───────────────────────────────────────────────────────────────
@@ -148,6 +225,11 @@ reviewsRouter.get("/:id/comments", async (c) => {
   const page  = Number.isFinite(pageRaw)  ? Math.max(1, pageRaw) : 1;
   const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, limitRaw)) : 50;
 
+  return c.json(await commentPage(id, page, limit));
+});
+
+/** Strona komentarzy recenzji (od najstarszych) z łączną liczbą. */
+async function commentPage(reviewId: string, page: number, limit: number) {
   const rows = await db
     .select({
       id: reviewComment.id, reviewId: reviewComment.reviewId, authorId: reviewComment.authorId,
@@ -155,12 +237,13 @@ reviewsRouter.get("/:id/comments", async (c) => {
     })
     .from(reviewComment)
     .innerJoin(user, eq(reviewComment.authorId, user.id))
-    .where(eq(reviewComment.reviewId, id))
+    .where(eq(reviewComment.reviewId, reviewId))
     .orderBy(asc(reviewComment.createdAt), asc(reviewComment.id))
     .limit(limit).offset((page - 1) * limit);
-
-  return c.json({ data: rows, page, limit });
-});
+  const total = (await db.select({ n: sql<number>`count(*)` }).from(reviewComment)
+    .where(eq(reviewComment.reviewId, reviewId)))[0]?.n ?? 0;
+  return { data: rows, page, limit, total };
+}
 
 reviewsRouter.post("/:id/comments", requireAuth, async (c) => {
   const u = c.get("user");

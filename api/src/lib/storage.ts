@@ -1,4 +1,5 @@
 import { mkdir, rm, rename, copyFile, unlink, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 
@@ -109,26 +110,61 @@ export async function storeFile(
   }
 }
 
-/** Przenosi istniejący plik między katalogiem publicznym a prywatnym (no-op, gdy już tam jest). */
-export async function setVisibility(bucket: BucketName, key: string, visibility: Visibility): Promise<void> {
-  const dest = filePath(bucket, key, visibility);
-  if (await isFile(dest)) return;
-  const src = filePath(bucket, key, visibility === "public" ? "private" : "public");
-  await mkdir(dirname(dest), { recursive: true });
-  await rename(src, dest); // ENOENT, gdy pliku nie ma w żadnym miejscu
+// ── Warianty obrazów (miniatury) ──────────────────────────────────────────────
+// Leżą obok oryginału, w tym samym katalogu (publicznym albo prywatnym):
+//   photos/<cam>/<uuid>.jpg -> photos/<cam>/<uuid>.w480.webp, photos/<cam>/<uuid>.w1280.webp
+export const VARIANTS = ["w480", "w1280", "w512"] as const;
+export type Variant = (typeof VARIANTS)[number];
+
+export function variantKey(key: string, variant: Variant): string {
+  return `${key.replace(/\.[^./]+$/, "")}.${variant}.webp`;
 }
 
-/** Trwale usuwa plik (z obu katalogów) na podstawie adresu storage://bucket/key. Brak pliku nie jest błędem. */
+/** Przenosi istniejący plik (razem z wariantami) między katalogiem publicznym a prywatnym. */
+export async function setVisibility(bucket: BucketName, key: string, visibility: Visibility): Promise<void> {
+  const other: Visibility = visibility === "public" ? "private" : "public";
+  const dest = filePath(bucket, key, visibility);
+  if (!(await isFile(dest))) {
+    await mkdir(dirname(dest), { recursive: true });
+    await rename(filePath(bucket, key, other), dest); // ENOENT, gdy pliku nie ma w żadnym miejscu
+  }
+  for (const v of VARIANTS) {
+    const vk = variantKey(key, v);
+    const src = filePath(bucket, vk, other);
+    if (await isFile(src)) await rename(src, filePath(bucket, vk, visibility));
+  }
+}
+
+/** Trwale usuwa plik i jego warianty (z obu katalogów). Brak pliku nie jest błędem. */
 export async function deleteStoredObject(url: string): Promise<void> {
   const parsed = parseStorageUrl(url);
   if (!parsed) return;
-  for (const vis of ["public", "private"] as const) {
-    try {
-      await unlink(filePath(parsed.bucket, parsed.key, vis));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  const keys = [parsed.key, ...VARIANTS.map((v) => variantKey(parsed.key, v))];
+  for (const k of keys) {
+    for (const vis of ["public", "private"] as const) {
+      try {
+        await unlink(filePath(parsed.bucket, k, vis));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
     }
   }
+}
+
+/**
+ * Adres wariantu (miniatury) do pokazania klientowi albo null, gdy wariantu jeszcze nie ma
+ * (stare pliki przed uzupełnieniem, formaty bez miniatur, np. HEIC). Klient używa wtedy oryginału.
+ */
+export function variantUrl(url: string | null, variant: Variant, isPublic: boolean): string | null {
+  if (!url) return null;
+  const parsed = parseStorageUrl(url);
+  if (!parsed) return null;
+  const vk = variantKey(parsed.key, variant);
+  let path: string;
+  try { path = filePath(parsed.bucket, vk, isPublic ? "public" : "private"); } catch { return null; }
+  if (!existsSync(path)) return null;
+  const vUrl = storageUrl(parsed.bucket, vk);
+  return isPublic ? publicUrl(vUrl) : signedUrl(vUrl);
 }
 
 export async function objectExists(bucket: BucketName, key: string): Promise<boolean> {
@@ -157,7 +193,10 @@ export function signedUrl(url: string | null): string | null {
   if (!url) return null;
   const parsed = parseStorageUrl(url);
   if (!parsed) return url;
-  const exp = Math.floor(Date.now() / 1000) + SIGNED_URL_TTL_S;
+  // Czas wygaśnięcia zaokrąglony do pełnej godziny (link ważny 1-2 h): w tym oknie adres jest
+  // stały, więc aplikacje mogą trzymać obraz w cache zamiast pobierać go przy każdym odświeżeniu.
+  const nowS = Math.floor(Date.now() / 1000);
+  const exp = (Math.floor(nowS / SIGNED_URL_TTL_S) + 2) * SIGNED_URL_TTL_S;
   const path = parsed.key.split("/").map(encodeURIComponent).join("/");
   return `${API_BASE}/api/media/private/${parsed.bucket}/${path}?exp=${exp}&sig=${sign(parsed.bucket, parsed.key, exp)}`;
 }

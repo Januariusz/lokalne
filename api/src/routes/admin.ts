@@ -5,7 +5,7 @@ import {
 } from "../db/schema.js";
 import { eq, and, or, isNull, gt, gte, desc, sql } from "drizzle-orm";
 import { requireRole, hasRole } from "../middleware/requireAuth.js";
-import { mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl } from "../lib/storage.js";
+import { mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl, variantUrl } from "../lib/storage.js";
 import { notify } from "../lib/notifications.js";
 import { getActiveBan } from "../lib/bans.js";
 import { fail } from "../lib/errors.js";
@@ -216,7 +216,7 @@ async function computeStats() {
   return {
     visitsLast24h:          await count(visitLog, gte(visitLog.visitedAt, day)),
     visitsLastWeek:         await count(visitLog, gte(visitLog.visitedAt, week)),
-    activeUsers,
+    activeUsers,                                                   // użytkownicy z sesją w ostatnich 30 dniach
     registrationsLast30Days: await count(user, and(gte(user.createdAt, month), eq(user.isDeletedUser, false))),
     activeBans:             await count(userBan, and(isNull(userBan.revokedAt), or(isNull(userBan.expiresAt), gt(userBan.expiresAt, new Date())))),
     totalBans:              await count(userBan),
@@ -230,6 +230,10 @@ async function computeStats() {
 
 adminRouter.get("/stats", async (c) => c.json(await computeStats()));
 
+/**
+ * Wszystko, czego potrzebuje ekran "Content management" + "Engagement statistics":
+ * 5 najnowszych recenzji do weryfikacji, ostatnie blokady i ukryte recenzje (tylko administrator) oraz statystyki.
+ */
 adminRouter.get("/dashboard", async (c) => {
   const actingUser = c.get("user");
   const isAdmin = hasRole(actingUser.role, "admin");
@@ -260,12 +264,14 @@ adminRouter.get("/media/pending", async (c) => {
   const pendingVideos = await db.select().from(video).where(eq(video.status, "pending"));
   return c.json({
     // niezweryfikowane pliki są prywatne: moderator dostaje podpisane, godzinne linki
-    photos: pendingPhotos.map((p) => ({ ...p, url: mediaUrl(p.storageUrl, false) })),
+    photos: pendingPhotos.map((p) => ({
+      ...p, url: mediaUrl(p.storageUrl, false), thumbUrl: variantUrl(p.storageUrl, "w480", false),
+    })),
     videos: pendingVideos.map((v) => ({ ...v, url: mediaUrl(v.storageUrl, false) })),
   });
 });
 
-// "deleted" oznacza trwałe usunięcie pliku z MinIO (wiersz zostaje w bazie ze statusem "deleted").
+// "deleted" oznacza trwałe usunięcie pliku z dysku (wiersz zostaje w bazie ze statusem "deleted").
 adminRouter.patch("/media/photos/:id", async (c) => {
   const id = c.req.param("id") as string;
   const body = await c.req.json<{ status: "verified" | "deleted" }>().catch(() => null);
