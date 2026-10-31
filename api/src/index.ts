@@ -14,6 +14,7 @@ import { startAggregationScheduler } from "./services/cameraAggregation.js";
 import { startVariantBackfill } from "./services/mediaVariants.js";
 import { db, optimizeDatabase } from "./db/index.js";
 import { backfillReviewPhones } from "./services/reviewPhones.js";
+import { tidyStoredNumbers } from "./services/numberCleanup.js";
 import { camera } from "./db/schema.js";
 import { sensorDenominatorOf } from "./lib/cameraSpec.js";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
@@ -85,6 +86,10 @@ if (process.env["AUTO_AGGREGATION"] === "true") {
 const PORT = parseInt(process.env["PORT"] ?? "3000", 10);
 
 await ensureStorageDirs();
+
+// Liczby zapisane przed zaokrąglaniem (szum float32 z Androida) - jednorazowo, potem nic nie zmienia.
+const tidied = tidyStoredNumbers();
+if (tidied > 0) console.log(`[numbers] tidied ${tidied} rows`);
 
 // Rozmiar matrycy jako liczba (do filtrów) dla aparatów zapisanych przed dodaniem tej kolumny.
 for (const r of db.select({ id: camera.id, f: camera.sensorFormat }).from(camera)

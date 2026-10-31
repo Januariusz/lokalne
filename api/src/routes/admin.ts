@@ -9,6 +9,7 @@ import { mediaUrl, deleteStoredObject, setVisibility, parseStorageUrl, variantUr
 import { notify } from "../lib/notifications.js";
 import { getActiveBan } from "../lib/bans.js";
 import { fail } from "../lib/errors.js";
+import { tidyNumber } from "../lib/numbers.js";
 import { deleteUserAccount } from "../services/userDeletion.js";
 import type { HonoVariables, Role } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
@@ -375,7 +376,7 @@ adminRouter.patch("/media/photos/:id/metadata", async (c) => {
     if (v !== null && v !== undefined && !isPositiveNumber(v)) {
       return fail(c, 400, "INVALID_FIELD", `${key} must be a positive number or null`);
     }
-    updates[key] = v ?? null;
+    updates[key] = v === null || v === undefined ? null : tidyNumber(v);
   }
   for (const key of ["widthPx", "heightPx"] as const) {
     if (body[key] === undefined) continue;

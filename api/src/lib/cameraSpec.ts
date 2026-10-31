@@ -1,6 +1,7 @@
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { photo } from "../db/schema.js";
+import { tidyNumber } from "./numbers.js";
 
 export const CAMERA_TYPES = ["wide", "ultrawide", "tele", "macro", "other"] as const;
 export const FACINGS      = ["back", "front", "other"] as const;
@@ -72,8 +73,9 @@ const RANGES = {
 
 const bad = (field: string, message: string): Invalid => ({ ok: false, field, message });
 
+// Liczby od klientów bez szumu float32 (2.4000000953674316 -> 2.4), patrz lib/numbers.ts.
 function num(v: unknown): number | null {
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
+  return typeof v === "number" && Number.isFinite(v) ? tidyNumber(v) : null;
 }
 
 /** Waliduje KOMPLETNĄ specyfikację aparatu (przy edycji: istniejące wartości scalone ze zmianami). */

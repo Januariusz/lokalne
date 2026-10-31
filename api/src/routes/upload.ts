@@ -9,6 +9,7 @@ import {
   variantUrl,
 } from "../lib/storage.js";
 import { fail } from "../lib/errors.js";
+import { tidyNumber } from "../lib/numbers.js";
 import { parseMultipartUpload, UploadError, type ParsedUpload } from "../lib/multipart.js";
 import type { HonoVariables } from "../types/honoTypes.js";
 import { randomUUID } from "node:crypto";
@@ -53,7 +54,7 @@ function optionalNumber(fields: Record<string, string>, key: string): number | n
   const raw = fields[key];
   if (raw === undefined || raw.trim() === "") return null;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  return Number.isFinite(n) ? tidyNumber(n) : null;
 }
 
 /**
