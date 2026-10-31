@@ -54,6 +54,9 @@ function optText(v: unknown): { ok: true; value: string | null } | { ok: false }
   return { ok: true, value: t === "" ? null : t };
 }
 
+export const MAX_VIDEO_FPS = 2000;
+export const MAX_VIDEO_SIDE = 16384;
+
 export type VideoModeInput = { widthPx: number; heightPx: number; fpsMax: number; note: string | null };
 
 export type Invalid = { ok: false; field: string; message: string };
@@ -202,7 +205,9 @@ export function validateVideoModes(input: unknown): { ok: true; data: VideoModeI
     const w = num(o["widthPx"]), h = num(o["heightPx"]), f = num(o["fpsMax"]);
     if (w === null || !Number.isInteger(w) || w < 1 || w > 16384) return bad("videoModes.widthPx", "widthPx must be an integer between 1 and 16384");
     if (h === null || !Number.isInteger(h) || h < 1 || h > 16384) return bad("videoModes.heightPx", "heightPx must be an integer between 1 and 16384");
-    if (f === null || f < 1 || f > 10000) return bad("videoModes.fpsMax", "fpsMax must be a number between 1 and 10000");
+    // 2000: najszybsze fizyczne tryby to ok. 1920 fps. Wartości interpolowane (np. 7680 fps) nie są
+    // trybami - moderator zapisuje je w `note` trybu 1920 fps.
+    if (f === null || f < 1 || f > MAX_VIDEO_FPS) return bad("videoModes.fpsMax", `fpsMax must be a number between 1 and ${MAX_VIDEO_FPS}`);
     const note = o["note"];
     if (note !== undefined && note !== null && (typeof note !== "string" || note.length > 128)) {
       return bad("videoModes.note", "note must be a string of at most 128 characters");

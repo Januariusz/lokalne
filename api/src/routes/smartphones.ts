@@ -8,7 +8,7 @@ import { publicUrl, variantUrl, deleteStoredObject } from "../lib/storage.js";
 import { detachPhoneFromReviews } from "../services/reviewPhones.js";
 import { deleteCamerasWithMedia } from "../services/cameraDeletion.js";
 import {
-  parseCatalogueQuery, parseCatalogueBody, searchCatalogue, FACINGS, type ParseError,
+  parseCatalogueQuery, parseCatalogueBody, searchCatalogue, catalogueFacets, FACINGS, type ParseError,
 } from "../services/catalogue.js";
 import {
   getSmartphoneDetail, getSmartphoneDetails, parseBuildModels, findPhoneIdByBuildModels,
@@ -51,6 +51,21 @@ function paging(c: { req: { query(name: string): string | undefined } }) {
 
 const parseFail = (c: Ctx, e: ParseError) =>
   fail(c, 400, e.code, e.message, e.field ? { field: e.field } : undefined);
+
+/**
+ * Zakresy filtrów wyszukiwarki z wartości obecnych w katalogu (koła wyboru w aplikacjach):
+ * dla każdego typu aparatu min/max ekwiwalentnej ogniskowej, przysłony, matrycy, rozdzielczości
+ * i lista fps trybów wideo. Tylko zatwierdzone tylne aparaty. ?verified=true|false jak w GET /.
+ */
+const FACETS_CACHE = "public, max-age=300, stale-while-revalidate=3600";
+smartphonesRouter.get("/facets", etag({ weak: true }), async (c) => {
+  const v = c.req.query("verified") || undefined;
+  if (v !== undefined && v !== "true" && v !== "false") {
+    return fail(c, 400, "INVALID_FILTER", "verified must be true or false", { field: "verified" });
+  }
+  c.header("Cache-Control", FACETS_CACHE);
+  return c.json(await catalogueFacets(v === undefined ? undefined : v === "true"));
+});
 
 smartphonesRouter.get("/compare", etag({ weak: true }), async (c) => {
   const idsParam = c.req.query("ids") ?? "";
@@ -105,6 +120,7 @@ smartphonesRouter.get("/by-model", async (c) => {
  *   resolution_min  - minimalna rozdzielczość matrycy (Mpx)
  *   sensor_den_min/max - rozmiar matrycy jako mianownik formatu ("1/1.28" -> 1.28; mniejszy = większa matryca)
  *   variable_aperture / optical_zoom - "true": tylko aparaty ze zmienną przysłoną / zoomem optycznym
+ *   video_min_width / video_min_fps - aparat ma tryb wideo z dłuższym bokiem >= i fps >= (ten sam tryb)
  *   verified        - "true": tylko zweryfikowane przez moderatora, "false": tylko niezweryfikowane
  *   release_from/to - zakres daty premiery (YYYY, YYYY-MM lub YYYY-MM-DD)
  * Filtry aparatu muszą być spełnione przez JEDEN zatwierdzony aparat danego telefonu.
@@ -121,8 +137,12 @@ smartphonesRouter.get("/", etag({ weak: true }), async (c) => {
  * Wyszukiwanie z treścią JSON (ta sama odpowiedź co GET /):
  * { q?, brandIds?: string[], sort?, verified?: boolean, releaseFrom?, releaseTo?, page?, limit?,
  *   cameras?: [{ type?, facing?, ois?: string[], eqFocalMin?, eqFocalMax?, eqApertureMin?, eqApertureMax?,
- *                resolutionMin?, sensorDenominatorMin?, sensorDenominatorMax?, variableAperture?, opticalZoom? }] }
+ *                resolutionMin?, sensorDenominatorMin?, sensorDenominatorMax?, variableAperture?, opticalZoom?,
+ *                videoMinWidth?, videoMinFps? }],
+ *   allBackCamerasVideo?: { minWidth?, minFps? } }
  * Każdy element `cameras` to osobny aparat: telefon musi mieć aparat spełniający każdy z nich.
+ * videoMinWidth/videoMinFps: aparat ma tryb wideo spełniający oba warunki (w jednym trybie).
+ * allBackCamerasVideo: KAŻDY zatwierdzony tylny aparat wide/ultrawide/tele ma taki tryb (makro pomijane).
  */
 smartphonesRouter.post("/search", async (c) => {
   const body = await c.req.json().catch(() => null);

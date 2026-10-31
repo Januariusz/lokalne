@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, exists, gte, inArray, like, lte, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { brand, camera, smartphone, smartphoneBuildModel } from "../db/schema.js";
+import { brand, camera, cameraVideoMode, smartphone, smartphoneBuildModel } from "../db/schema.js";
+import { MAX_VIDEO_FPS, MAX_VIDEO_SIDE } from "../lib/cameraSpec.js";
 import { publicUrl, variantUrl } from "../lib/storage.js";
 
 export const CAMERA_TYPES = ["wide", "ultrawide", "tele", "macro", "other"] as const;
@@ -27,7 +28,13 @@ export type CameraFilter = {
   sensorDenominatorMax?: number;
   variableAperture?: boolean;
   opticalZoom?: boolean;
+  /** Aparat ma tryb wideo z MAX(szer., wys.) >= videoMinWidth I fps >= videoMinFps (ten sam tryb). */
+  videoMinWidth?: number;
+  videoMinFps?: number;
 };
+
+/** Warunek trybu wideo: dłuższy bok >= minWidth i fps >= minFps (w jednym trybie). */
+export type VideoReq = { minWidth?: number; minFps?: number };
 
 export type CatalogueQuery = {
   q: string;
@@ -40,6 +47,8 @@ export type CatalogueQuery = {
   limit: number;
   /** Każdy element to osobny aparat; telefon musi mieć aparat spełniający KAŻDY z nich (AND). */
   cameras: CameraFilter[];
+  /** Każdy zatwierdzony tylny aparat wide/ultrawide/tele ma tryb spełniający warunek (POST /search). */
+  allBackCamerasVideo?: VideoReq;
 };
 
 export type ParseError = { code: string; message: string; field?: string };
@@ -90,7 +99,32 @@ function parseCameraFilter(raw: Record<string, unknown>, fieldPrefix: string): P
     if (typeof v !== "boolean") return bad("INVALID_FILTER", `${k} must be a boolean`, `${fieldPrefix}${k}`);
     if (v) f[k] = true; // false = brak filtra
   }
+  const video = parseVideoReq(raw["videoMinWidth"], raw["videoMinFps"], `${fieldPrefix}videoMinWidth`, `${fieldPrefix}videoMinFps`);
+  if (!video.ok) return video;
+  if (video.value.minWidth !== undefined) f.videoMinWidth = video.value.minWidth;
+  if (video.value.minFps !== undefined) f.videoMinFps = video.value.minFps;
   return { ok: true, value: f };
+}
+
+/** Opcjonalna liczba z zakresu; null/brak/"" = brak warunku (undefined). */
+function rangeValue(raw: unknown, min: number, max: number, integer: boolean, field: string): Parsed<number | undefined> {
+  if (raw === undefined || raw === null || raw === "") return { ok: true, value: undefined };
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n))) {
+    return bad("INVALID_FILTER", `${field} must be ${integer ? "an integer" : "a number"} between ${min} and ${max}`, field);
+  }
+  return { ok: true, value: n };
+}
+
+function parseVideoReq(widthRaw: unknown, fpsRaw: unknown, widthField: string, fpsField: string): Parsed<VideoReq> {
+  const w = rangeValue(widthRaw, 1, MAX_VIDEO_SIDE, true, widthField);
+  if (!w.ok) return w;
+  const f = rangeValue(fpsRaw, 1, MAX_VIDEO_FPS, false, fpsField);
+  if (!f.ok) return f;
+  const req: VideoReq = {};
+  if (w.value !== undefined) req.minWidth = w.value;
+  if (f.value !== undefined) req.minFps = f.value;
+  return { ok: true, value: req };
 }
 
 const hasConditions = (f: CameraFilter) => Object.keys(f).length > 0;
@@ -142,6 +176,8 @@ export function parseCatalogueQuery(
     sensorDenominatorMax: query("sensor_den_max"),
     variableAperture: query("variable_aperture") === "true" ? true : undefined,
     opticalZoom: query("optical_zoom") === "true" ? true : undefined,
+    videoMinWidth: query("video_min_width"),
+    videoMinFps: query("video_min_fps"),
   }, "");
   if (!cam.ok) {
     // w adresie pola mają nazwy z podkreśleniami
@@ -149,6 +185,7 @@ export function parseCatalogueQuery(
       type: "camera_type", eqFocalMin: "eq_focal_min", eqFocalMax: "eq_focal_max",
       eqApertureMin: "eq_aperture_min", eqApertureMax: "eq_aperture_max", resolutionMin: "resolution_min",
       sensorDenominatorMin: "sensor_den_min", sensorDenominatorMax: "sensor_den_max",
+      videoMinWidth: "video_min_width", videoMinFps: "video_min_fps",
     };
     const field = cam.error.field ?? "";
     return bad(cam.error.code, cam.error.message.replace(field, map[field] ?? field), map[field] ?? field);
@@ -195,6 +232,17 @@ export function parseCatalogueBody(body: unknown): Parsed<CatalogueQuery> {
   for (const k of ["releaseFrom", "releaseTo"] as const) {
     if (b[k] !== undefined && b[k] !== null && typeof b[k] !== "string") return bad("INVALID_FILTER", `${k} must be a string`, k);
   }
+  let allBackCamerasVideo: VideoReq | undefined;
+  const abv = b["allBackCamerasVideo"];
+  if (abv !== undefined && abv !== null) {
+    if (typeof abv !== "object" || Array.isArray(abv)) {
+      return bad("INVALID_FILTER", "allBackCamerasVideo must be an object { minWidth?, minFps? }", "allBackCamerasVideo");
+    }
+    const o = abv as Record<string, unknown>;
+    const v = parseVideoReq(o["minWidth"], o["minFps"], "allBackCamerasVideo.minWidth", "allBackCamerasVideo.minFps");
+    if (!v.ok) return v;
+    if (Object.keys(v.value).length > 0) allBackCamerasVideo = v.value;
+  }
 
   return validateCommon({
     q: typeof b["q"] === "string" ? b["q"].trim() : "",
@@ -205,6 +253,7 @@ export function parseCatalogueBody(body: unknown): Parsed<CatalogueQuery> {
     releaseTo: (b["releaseTo"] as string | undefined) || undefined,
     ...parsePaging(b["page"], b["limit"]),
     cameras,
+    allBackCamerasVideo,
   });
 }
 
@@ -231,7 +280,31 @@ function cameraConds(f: CameraFilter): SQL[] {
   if (f.resolutionMin !== undefined) c.push(gte(camera.resolutionMp, f.resolutionMin));
   if (f.sensorDenominatorMin !== undefined) c.push(sql`${SENSOR_DEN} >= ${f.sensorDenominatorMin}`);
   if (f.sensorDenominatorMax !== undefined) c.push(sql`${SENSOR_DEN} <= ${f.sensorDenominatorMax}`);
+  if (f.videoMinWidth !== undefined || f.videoMinFps !== undefined) {
+    c.push(sql`EXISTS (SELECT 1 FROM ${cameraVideoMode} vm WHERE vm.camera_id = ${camera.id}${videoModeConds({ minWidth: f.videoMinWidth, minFps: f.videoMinFps })})`);
+  }
   return c;
+}
+
+/** Warunki na wiersz trybu wideo `vm` (oba w tym samym wierszu); dłuższy bok, bo tryby bywają zapisane w pionie. */
+function videoModeConds(r: VideoReq): SQL {
+  const parts: SQL[] = [];
+  if (r.minWidth !== undefined) parts.push(sql` AND MAX(vm.width_px, vm.height_px) >= ${r.minWidth}`);
+  if (r.minFps !== undefined)   parts.push(sql` AND vm.fps_max >= ${r.minFps}`);
+  return sql.join(parts, sql``);
+}
+
+const MAIN_BACK_TYPES = sql`('wide', 'ultrawide', 'tele')`;
+
+/**
+ * Każdy zatwierdzony tylny aparat wide/ultrawide/tele telefonu ma tryb spełniający warunek
+ * (makro i "other" pomijane), i telefon ma co najmniej jeden taki aparat.
+ */
+function allBackCamerasVideoCond(r: VideoReq): SQL {
+  const mainBack = sql`c.smartphone_id = ${smartphone.id} AND c.status = 'approved' AND c.facing = 'back' AND c.type IN ${MAIN_BACK_TYPES}`;
+  return sql`(EXISTS (SELECT 1 FROM ${camera} c WHERE ${mainBack})
+    AND NOT EXISTS (SELECT 1 FROM ${camera} c WHERE ${mainBack}
+      AND NOT EXISTS (SELECT 1 FROM ${cameraVideoMode} vm WHERE vm.camera_id = c.id${videoModeConds(r)})))`;
 }
 
 function whereOf(q: CatalogueQuery): SQL | undefined {
@@ -262,6 +335,7 @@ function whereOf(q: CatalogueQuery): SQL | undefined {
         .where(and(eq(camera.smartphoneId, smartphone.id), eq(camera.status, "approved"), ...cameraConds(f))),
     ));
   }
+  if (q.allBackCamerasVideo) conds.push(allBackCamerasVideoCond(q.allBackCamerasVideo));
   return conds.length > 0 ? and(...conds) : undefined;
 }
 
@@ -314,4 +388,63 @@ export async function searchCatalogue(q: CatalogueQuery) {
     .where(where);
 
   return { data: rows.map(listItem), page: q.page, limit: q.limit, total: totalRows[0]?.n ?? 0, sort: q.sort };
+}
+
+// ── zakresy filtrów (GET /api/smartphones/facets) ─────────────────────────────────────────────────
+
+const round2 = (v: number | null) => (v === null || v === undefined ? null : Math.round(v * 100) / 100);
+
+export type TypeFacet = {
+  count: number;
+  eqFocalMin: number | null; eqFocalMax: number | null;
+  eqApertureMin: number | null; eqApertureMax: number | null;
+  sensorDenominatorMin: number | null; sensorDenominatorMax: number | null;
+  resolutionMpMin: number | null; resolutionMpMax: number | null;
+  fpsValues: number[];
+};
+
+/**
+ * Wartości faktycznie obecne w katalogu, dla każdego typu aparatu: zakresy ekwiwalentnej ogniskowej
+ * i przysłony (z uwzględnieniem zoomu optycznego i zmiennej przysłony), rozmiaru matrycy, rozdzielczości
+ * i lista fps trybów wideo. Tylko zatwierdzone tylne aparaty; `verified` jak w liście katalogu.
+ */
+export async function catalogueFacets(verified?: boolean): Promise<{ types: Record<(typeof CAMERA_TYPES)[number], TypeFacet> }> {
+  const conds: SQL[] = [eq(camera.status, "approved"), eq(camera.facing, "back")];
+  if (verified === true)  conds.push(sql`${smartphone.verifiedBy} IS NOT NULL`);
+  if (verified === false) conds.push(sql`${smartphone.verifiedBy} IS NULL`);
+  const where = and(...conds);
+
+  const rows = await db.select({
+    type: camera.type,
+    count: sql<number>`count(*)`,
+    eqFocalMin: sql<number | null>`min(${EQ_FOCAL})`,
+    eqFocalMax: sql<number | null>`max(COALESCE(${camera.focalLengthMaxMm}, ${camera.focalLengthMm}) * ${camera.cropFactor})`,
+    eqApertureMin: sql<number | null>`min(${EQ_APERTURE})`,
+    eqApertureMax: sql<number | null>`max(${EQ_APERTURE_N})`,
+    sensorDenominatorMin: sql<number | null>`min(${SENSOR_DEN})`,
+    sensorDenominatorMax: sql<number | null>`max(${SENSOR_DEN})`,
+    resolutionMpMin: sql<number | null>`min(${camera.resolutionMp})`,
+    resolutionMpMax: sql<number | null>`max(${camera.resolutionMp})`,
+  }).from(camera).innerJoin(smartphone, eq(camera.smartphoneId, smartphone.id)).where(where).groupBy(camera.type);
+
+  const fpsRows = await db.selectDistinct({ type: camera.type, fps: cameraVideoMode.fpsMax })
+    .from(cameraVideoMode)
+    .innerJoin(camera, eq(cameraVideoMode.cameraId, camera.id))
+    .innerJoin(smartphone, eq(camera.smartphoneId, smartphone.id))
+    .where(where)
+    .orderBy(asc(cameraVideoMode.fpsMax));
+
+  const types = {} as Record<(typeof CAMERA_TYPES)[number], TypeFacet>;
+  for (const t of CAMERA_TYPES) {
+    const r = rows.find((x) => x.type === t);
+    types[t] = {
+      count: r?.count ?? 0,
+      eqFocalMin: round2(r?.eqFocalMin ?? null), eqFocalMax: round2(r?.eqFocalMax ?? null),
+      eqApertureMin: round2(r?.eqApertureMin ?? null), eqApertureMax: round2(r?.eqApertureMax ?? null),
+      sensorDenominatorMin: round2(r?.sensorDenominatorMin ?? null), sensorDenominatorMax: round2(r?.sensorDenominatorMax ?? null),
+      resolutionMpMin: round2(r?.resolutionMpMin ?? null), resolutionMpMax: round2(r?.resolutionMpMax ?? null),
+      fpsValues: [...new Set(fpsRows.filter((x) => x.type === t).map((x) => round2(x.fps)!))],
+    };
+  }
+  return { types };
 }
