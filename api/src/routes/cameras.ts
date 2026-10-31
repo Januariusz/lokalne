@@ -24,11 +24,55 @@ async function withSamples<T extends { id: string; variableAperture: boolean; op
   return { ...row, samples: await sampleCoverage(row.id, row) };
 }
 
-/** Lista zgłoszeń z pokryciem próbkami i krótkim opisem telefonu (nazwa, marka, zdjęcie) - zbiorczo. */
+/** Lista zgłoszeń z pokryciem próbkami, trybami wideo i krótkim opisem telefonu - zbiorczo. */
 async function decorateList<T extends { id: string; smartphoneId: string; variableAperture: boolean; opticalZoom: boolean }>(rows: T[]) {
   const samples = await sampleCoverageMany(rows);
   const phones = await phoneSummaries(rows.map((r) => r.smartphoneId));
-  return rows.map((r) => ({ ...r, samples: samples.get(r.id)!, phone: phones.get(r.smartphoneId) ?? null }));
+  const modes = await videoModesOf(rows.map((r) => r.id));
+  return rows.map((r) => ({
+    ...r, samples: samples.get(r.id)!, phone: phones.get(r.smartphoneId) ?? null, videoModes: modes.get(r.id) ?? [],
+  }));
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type VideoModeRow = { widthPx: number; heightPx: number; fpsMax: number; note: string | null };
+
+/**
+ * `videoModes` z treści PATCH: brak pola = bez zmian (null), inaczej pełna docelowa lista ([] usuwa wszystko).
+ * Ten sam tryb (rozdzielczość bez względu na orientację + fpsMax) dwa razy -> błąd.
+ */
+function parseVideoModesPatch(body: Record<string, unknown>):
+  { ok: true; data: VideoModeRow[] | null } | { ok: false; field: string; message: string } {
+  if (!("videoModes" in body)) return { ok: true, data: null };
+  if (!Array.isArray(body["videoModes"])) {
+    return { ok: false, field: "videoModes", message: "videoModes must be an array (use [] to remove all modes)" };
+  }
+  const v = validateVideoModes(body["videoModes"]);
+  if (!v.ok) return v;
+  const seen = new Set<string>();
+  for (const m of v.data) {
+    const key = `${Math.max(m.widthPx, m.heightPx)}x${Math.min(m.widthPx, m.heightPx)}@${m.fpsMax}`;
+    if (seen.has(key)) {
+      return { ok: false, field: "videoModes", message: `Duplicate video mode ${m.widthPx}x${m.heightPx} ${m.fpsMax} fps` };
+    }
+    seen.add(key);
+  }
+  return { ok: true, data: v.data };
+}
+
+/** Zastępuje tryby wideo aparatu (w transakcji wywołującego). */
+function replaceVideoModes(tx: Tx, cameraId: string, modes: VideoModeRow[]): void {
+  tx.delete(cameraVideoMode).where(eq(cameraVideoMode.cameraId, cameraId)).run();
+  if (modes.length) {
+    tx.insert(cameraVideoMode).values(modes.map((m) => ({ id: randomUUID(), cameraId, ...m }))).run();
+  }
+}
+
+/** Aparat po zmianie, z trybami wideo (odpowiedź PATCH). */
+async function cameraWithModes(id: string) {
+  const row = (await db.select().from(camera).where(eq(camera.id, id)))[0];
+  if (!row) return null;
+  return { ...row, videoModes: (await videoModesOf([id])).get(id) ?? [] };
 }
 
 camerasRouter.get("/", async (c) => {
@@ -123,6 +167,7 @@ camerasRouter.post("/", requireAuth, async (c) => {
 /**
  * Moderator poprawia dane aparatu (przycisk "Edit" przy tabeli specyfikacji),
  * bez zmiany statusu zgłoszenia. Wszystkie pola opcjonalne; wynik jest walidowany w całości.
+ * `videoModes` - pełna nowa lista trybów wideo (np. dopisanie 4K 60 fps, którego telefon nie zgłosił).
  */
 camerasRouter.patch("/:id", requireRole("moderator"), async (c) => {
   const id = c.req.param("id") as string;
@@ -134,15 +179,20 @@ camerasRouter.patch("/:id", requireRole("moderator"), async (c) => {
 
   const changes: Record<string, unknown> = {};
   for (const k of SPEC_KEYS) if (k in body) changes[k] = body[k];
-  if (Object.keys(changes).length === 0) {
+  if (Object.keys(changes).length === 0 && !("videoModes" in body)) {
     return fail(c, 400, "NOTHING_TO_UPDATE", "Provide at least one field to update");
   }
 
   const spec = validateCameraSpec({ ...existing, ...changes });
   if (!spec.ok) return fail(c, 400, "INVALID_FIELD", spec.message, { field: spec.field });
+  const modes = parseVideoModesPatch(body);
+  if (!modes.ok) return fail(c, 400, "INVALID_FIELD", modes.message, { field: modes.field });
 
-  await db.update(camera).set(spec.data).where(eq(camera.id, id));
-  return c.json({ ok: true });
+  db.transaction((tx) => {
+    tx.update(camera).set(spec.data).where(eq(camera.id, id)).run();
+    if (modes.data) replaceVideoModes(tx, id, modes.data);
+  });
+  return c.json({ ok: true, camera: await cameraWithModes(id) });
 });
 
 /**
@@ -174,12 +224,17 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
     return fail(c, 409, "ALREADY_REVIEWED", "This submission has already been reviewed", { status: existing.status });
   }
 
+  // Tryby wideo poprawiane przy zatwierdzeniu; przy odrzuceniu pole jest ignorowane.
+  let newModes: VideoModeRow[] | null = null;
   if (status === "approved") {
     const changes: Record<string, unknown> = {};
     for (const k of SPEC_KEYS) if (k in body) changes[k] = body[k];
     const spec = validateCameraSpec({ ...existing, ...changes });
     if (!spec.ok) return fail(c, 400, "INVALID_FIELD", spec.message, { field: spec.field });
     Object.assign(updates, spec.data);
+    const m = parseVideoModesPatch(body);
+    if (!m.ok) return fail(c, 400, "INVALID_FIELD", m.message, { field: m.field });
+    newModes = m.data;
 
     // Pokrycie próbkami (samples) jest tylko informacją dla moderatora - ręczne zatwierdzenie
     // nie wymaga zdjęć (np. dane z oficjalnej specyfikacji producenta).
@@ -197,6 +252,7 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
       const now = tx.select({ status: camera.status }).from(camera).where(eq(camera.id, id)).all()[0];
       return { error: "ALREADY_REVIEWED" as const, status: now?.status ?? null };
     }
+    if (newModes) replaceVideoModes(tx, id, newModes);
     return null;
   });
   if (outcome?.error === "CAMERA_EXISTS") {
@@ -209,7 +265,7 @@ camerasRouter.patch("/:id/review", requireRole("moderator"), async (c) => {
   await notify(existing.submitterId, "camera_reviewed", {
     cameraId: id, smartphoneId: existing.smartphoneId, status,
   });
-  return c.json({ ok: true });
+  return c.json({ ok: true, camera: await cameraWithModes(id) });
 });
 
 /**

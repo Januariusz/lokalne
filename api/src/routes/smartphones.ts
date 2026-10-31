@@ -95,7 +95,7 @@ smartphonesRouter.get("/by-model", async (c) => {
  * Katalog telefonów.
  *   q               - fraza; każde słowo musi pasować do nazwy modelu, marki LUB kodu modelu
  *   brand_id        - marka; kilka: brand_id=a,b,c albo powtórzony parametr (maks. 20)
- *   sort            - name (domyślnie, bez rozróżniania wielkości liter) | trending | new
+ *   sort            - name (domyślnie, bez rozróżniania wielkości liter) | brand (marka, potem model) | trending | new
  *   camera_type     - wide | ultrawide | tele | macro | other
  *   facing          - back | front | other
  *   ois             - none | optical | sensor_shift; kilka po przecinku

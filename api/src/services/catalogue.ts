@@ -6,7 +6,7 @@ import { publicUrl, variantUrl } from "../lib/storage.js";
 export const CAMERA_TYPES = ["wide", "ultrawide", "tele", "macro", "other"] as const;
 export const FACINGS      = ["back", "front", "other"] as const;
 export const OIS_TYPES    = ["none", "optical", "sensor_shift"] as const;
-export const SORTS        = ["name", "trending", "new"] as const;
+export const SORTS        = ["name", "brand", "trending", "new"] as const;
 const DATE_RE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
 
 const MAX_BRANDS  = 20;
@@ -283,6 +283,8 @@ export async function searchCatalogue(q: CatalogueQuery) {
   const orderBy =
     q.sort === "trending" ? [desc(smartphone.viewCount), desc(smartphone.createdAt), asc(smartphone.id)]
   : q.sort === "new"      ? [desc(smartphone.releaseDate), desc(smartphone.createdAt), asc(smartphone.id)]
+  // "brand": marka, potem model ("Xiaomi 12" z modelem "12" trafia do Xiaomi, a nie na górę listy).
+  : q.sort === "brand"    ? [sql`${brand.name} COLLATE NOCASE`, sql`${smartphone.modelName} COLLATE NOCASE`, asc(smartphone.id)]
   :                         [sql`${smartphone.modelName} COLLATE NOCASE`, asc(smartphone.id)];
 
   const rows = await db
