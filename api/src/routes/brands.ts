@@ -15,7 +15,7 @@ const BRANDS_CACHE = "public, max-age=300, stale-while-revalidate=3600";
 
 // Kolejność alfabetyczna bez rozróżniania wielkości liter ("realme" obok "Redmi", nie na końcu).
 brandsRouter.get("/", etag({ weak: true }), async (c) => {
-  const rows = await db.select().from(brand).orderBy(sql`${brand.name} COLLATE NOCASE`, asc(brand.id));
+  const rows = await db.select().from(brand).orderBy(sql`natural_key(${brand.name})`, asc(brand.id));
   c.header("Cache-Control", BRANDS_CACHE);
   return c.json(rows.map((r) => ({ ...r, logoUrl: publicUrl(r.logoUrl) })));
 });

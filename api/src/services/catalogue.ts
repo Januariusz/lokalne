@@ -283,9 +283,10 @@ export async function searchCatalogue(q: CatalogueQuery) {
   const orderBy =
     q.sort === "trending" ? [desc(smartphone.viewCount), desc(smartphone.createdAt), asc(smartphone.id)]
   : q.sort === "new"      ? [desc(smartphone.releaseDate), desc(smartphone.createdAt), asc(smartphone.id)]
+  // Nazwy sortowane naturalnie (natural_key, db/index.ts): "Galaxy S8, S9, S20", "Pixel 9, 10".
   // "brand": marka, potem model ("Xiaomi 12" z modelem "12" trafia do Xiaomi, a nie na górę listy).
-  : q.sort === "brand"    ? [sql`${brand.name} COLLATE NOCASE`, sql`${smartphone.modelName} COLLATE NOCASE`, asc(smartphone.id)]
-  :                         [sql`${smartphone.modelName} COLLATE NOCASE`, asc(smartphone.id)];
+  : q.sort === "brand"    ? [sql`natural_key(${brand.name})`, sql`natural_key(${smartphone.modelName})`, asc(smartphone.id)]
+  :                         [sql`natural_key(${smartphone.modelName})`, asc(smartphone.id)];
 
   const rows = await db
     .select({
