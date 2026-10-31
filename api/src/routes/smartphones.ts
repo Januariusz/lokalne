@@ -55,7 +55,8 @@ const parseFail = (c: Ctx, e: ParseError) =>
 /**
  * Zakresy filtrów wyszukiwarki z wartości obecnych w katalogu (koła wyboru w aplikacjach):
  * dla każdego typu aparatu min/max ekwiwalentnej ogniskowej, przysłony, matrycy, rozdzielczości
- * i lista fps trybów wideo. Tylko zatwierdzone tylne aparaty. ?verified=true|false jak w GET /.
+ * i lista fps trybów wideo, największy fps dla progów rozdzielczości (videoMaxFpsByWidth).
+ * `types` - zatwierdzone tylne aparaty według typu, `front` - zatwierdzone przednie razem. ?verified= jak w GET /.
  */
 const FACETS_CACHE = "public, max-age=300, stale-while-revalidate=3600";
 smartphonesRouter.get("/facets", etag({ weak: true }), async (c) => {
@@ -139,10 +140,11 @@ smartphonesRouter.get("/", etag({ weak: true }), async (c) => {
  *   cameras?: [{ type?, facing?, ois?: string[], eqFocalMin?, eqFocalMax?, eqApertureMin?, eqApertureMax?,
  *                resolutionMin?, sensorDenominatorMin?, sensorDenominatorMax?, variableAperture?, opticalZoom?,
  *                videoMinWidth?, videoMinFps? }],
- *   allBackCamerasVideo?: { minWidth?, minFps? } }
+ *   allBackCamerasVideo?: { minWidth?, minFps? }, frontCameraCountMin?: 1-5 }
  * Każdy element `cameras` to osobny aparat: telefon musi mieć aparat spełniający każdy z nich.
  * videoMinWidth/videoMinFps: aparat ma tryb wideo spełniający oba warunki (w jednym trybie).
  * allBackCamerasVideo: KAŻDY zatwierdzony tylny aparat wide/ultrawide/tele ma taki tryb (makro pomijane).
+ * frontCameraCountMin: telefon ma co najmniej tyle zatwierdzonych przednich aparatów.
  */
 smartphonesRouter.post("/search", async (c) => {
   const body = await c.req.json().catch(() => null);

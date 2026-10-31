@@ -49,6 +49,8 @@ export type CatalogueQuery = {
   cameras: CameraFilter[];
   /** Każdy zatwierdzony tylny aparat wide/ultrawide/tele ma tryb spełniający warunek (POST /search). */
   allBackCamerasVideo?: VideoReq;
+  /** Telefon ma co najmniej tyle zatwierdzonych przednich aparatów (POST /search). */
+  frontCameraCountMin?: number;
 };
 
 export type ParseError = { code: string; message: string; field?: string };
@@ -243,6 +245,8 @@ export function parseCatalogueBody(body: unknown): Parsed<CatalogueQuery> {
     if (!v.ok) return v;
     if (Object.keys(v.value).length > 0) allBackCamerasVideo = v.value;
   }
+  const fc = rangeValue(b["frontCameraCountMin"], 1, 5, true, "frontCameraCountMin");
+  if (!fc.ok) return fc;
 
   return validateCommon({
     q: typeof b["q"] === "string" ? b["q"].trim() : "",
@@ -254,6 +258,7 @@ export function parseCatalogueBody(body: unknown): Parsed<CatalogueQuery> {
     ...parsePaging(b["page"], b["limit"]),
     cameras,
     allBackCamerasVideo,
+    frontCameraCountMin: fc.value,
   });
 }
 
@@ -336,6 +341,10 @@ function whereOf(q: CatalogueQuery): SQL | undefined {
     ));
   }
   if (q.allBackCamerasVideo) conds.push(allBackCamerasVideoCond(q.allBackCamerasVideo));
+  if (q.frontCameraCountMin !== undefined) {
+    conds.push(sql`(SELECT count(*) FROM ${camera} fc WHERE fc.smartphone_id = ${smartphone.id}
+      AND fc.status = 'approved' AND fc.facing = 'front') >= ${q.frontCameraCountMin}`);
+  }
   return conds.length > 0 ? and(...conds) : undefined;
 }
 
@@ -394,6 +403,8 @@ export async function searchCatalogue(q: CatalogueQuery) {
 
 const round2 = (v: number | null) => (v === null || v === undefined ? null : Math.round(v * 100) / 100);
 
+export const VIDEO_WIDTH_THRESHOLDS = [1280, 1920, 3840, 7680] as const;
+
 export type TypeFacet = {
   count: number;
   eqFocalMin: number | null; eqFocalMax: number | null;
@@ -401,21 +412,52 @@ export type TypeFacet = {
   sensorDenominatorMin: number | null; sensorDenominatorMax: number | null;
   resolutionMpMin: number | null; resolutionMpMax: number | null;
   fpsValues: number[];
+  /** Próg dłuższego boku ("1280", "1920", "3840", "7680") -> największy fps trybu o boku >= progu; null = brak. */
+  videoMaxFpsByWidth: Record<string, number | null>;
 };
 
+type StatRow = {
+  type: string; facing: string; count: number;
+  eqFocalMin: number | null; eqFocalMax: number | null; eqApertureMin: number | null; eqApertureMax: number | null;
+  sensorDenominatorMin: number | null; sensorDenominatorMax: number | null;
+  resolutionMpMin: number | null; resolutionMpMax: number | null;
+};
+type ModeRow = { type: string; facing: string; side: number; fps: number };
+
+const minOf = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x !== null); return v.length ? Math.min(...v) : null; };
+const maxOf = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x !== null); return v.length ? Math.max(...v) : null; };
+
+/** Łączy statystyki kilku grup (np. przednie aparaty wszystkich typów) w jeden opis. */
+function facetOf(stats: StatRow[], modes: ModeRow[]): TypeFacet {
+  const byWidth: Record<string, number | null> = {};
+  for (const t of VIDEO_WIDTH_THRESHOLDS) byWidth[String(t)] = round2(maxOf(modes.filter((m) => m.side >= t).map((m) => m.fps)));
+  return {
+    count: stats.reduce((n, r) => n + r.count, 0),
+    eqFocalMin: round2(minOf(stats.map((r) => r.eqFocalMin))), eqFocalMax: round2(maxOf(stats.map((r) => r.eqFocalMax))),
+    eqApertureMin: round2(minOf(stats.map((r) => r.eqApertureMin))), eqApertureMax: round2(maxOf(stats.map((r) => r.eqApertureMax))),
+    sensorDenominatorMin: round2(minOf(stats.map((r) => r.sensorDenominatorMin))),
+    sensorDenominatorMax: round2(maxOf(stats.map((r) => r.sensorDenominatorMax))),
+    resolutionMpMin: round2(minOf(stats.map((r) => r.resolutionMpMin))), resolutionMpMax: round2(maxOf(stats.map((r) => r.resolutionMpMax))),
+    fpsValues: [...new Set(modes.map((m) => round2(m.fps)!))].sort((a, b) => a - b),
+    videoMaxFpsByWidth: byWidth,
+  };
+}
+
 /**
- * Wartości faktycznie obecne w katalogu, dla każdego typu aparatu: zakresy ekwiwalentnej ogniskowej
- * i przysłony (z uwzględnieniem zoomu optycznego i zmiennej przysłony), rozmiaru matrycy, rozdzielczości
- * i lista fps trybów wideo. Tylko zatwierdzone tylne aparaty; `verified` jak w liście katalogu.
+ * Wartości faktycznie obecne w katalogu (zatwierdzone aparaty): `types` - tylne aparaty według typu,
+ * `front` - wszystkie przednie razem. Zakresy ekwiwalentnej ogniskowej i przysłony (z zoomem optycznym
+ * i zmienną przysłoną), matrycy, rozdzielczości, fps trybów wideo i największy fps dla progów rozdzielczości.
+ * `verified` jak w liście katalogu.
  */
-export async function catalogueFacets(verified?: boolean): Promise<{ types: Record<(typeof CAMERA_TYPES)[number], TypeFacet> }> {
-  const conds: SQL[] = [eq(camera.status, "approved"), eq(camera.facing, "back")];
+export async function catalogueFacets(verified?: boolean): Promise<{ types: Record<(typeof CAMERA_TYPES)[number], TypeFacet>; front: TypeFacet }> {
+  const conds: SQL[] = [eq(camera.status, "approved"), inArray(camera.facing, ["back", "front"])];
   if (verified === true)  conds.push(sql`${smartphone.verifiedBy} IS NOT NULL`);
   if (verified === false) conds.push(sql`${smartphone.verifiedBy} IS NULL`);
   const where = and(...conds);
 
-  const rows = await db.select({
+  const stats: StatRow[] = await db.select({
     type: camera.type,
+    facing: camera.facing,
     count: sql<number>`count(*)`,
     eqFocalMin: sql<number | null>`min(${EQ_FOCAL})`,
     eqFocalMax: sql<number | null>`max(COALESCE(${camera.focalLengthMaxMm}, ${camera.focalLengthMm}) * ${camera.cropFactor})`,
@@ -425,26 +467,22 @@ export async function catalogueFacets(verified?: boolean): Promise<{ types: Reco
     sensorDenominatorMax: sql<number | null>`max(${SENSOR_DEN})`,
     resolutionMpMin: sql<number | null>`min(${camera.resolutionMp})`,
     resolutionMpMax: sql<number | null>`max(${camera.resolutionMp})`,
-  }).from(camera).innerJoin(smartphone, eq(camera.smartphoneId, smartphone.id)).where(where).groupBy(camera.type);
+  }).from(camera).innerJoin(smartphone, eq(camera.smartphoneId, smartphone.id)).where(where).groupBy(camera.type, camera.facing);
 
-  const fpsRows = await db.selectDistinct({ type: camera.type, fps: cameraVideoMode.fpsMax })
-    .from(cameraVideoMode)
+  // Tryby: dłuższy bok (tryby bywają zapisane w pionie) i fps
+  const modes: ModeRow[] = await db.selectDistinct({
+    type: camera.type,
+    facing: camera.facing,
+    side: sql<number>`MAX(${cameraVideoMode.widthPx}, ${cameraVideoMode.heightPx})`,
+    fps: cameraVideoMode.fpsMax,
+  }).from(cameraVideoMode)
     .innerJoin(camera, eq(cameraVideoMode.cameraId, camera.id))
     .innerJoin(smartphone, eq(camera.smartphoneId, smartphone.id))
-    .where(where)
-    .orderBy(asc(cameraVideoMode.fpsMax));
+    .where(where);
 
   const types = {} as Record<(typeof CAMERA_TYPES)[number], TypeFacet>;
   for (const t of CAMERA_TYPES) {
-    const r = rows.find((x) => x.type === t);
-    types[t] = {
-      count: r?.count ?? 0,
-      eqFocalMin: round2(r?.eqFocalMin ?? null), eqFocalMax: round2(r?.eqFocalMax ?? null),
-      eqApertureMin: round2(r?.eqApertureMin ?? null), eqApertureMax: round2(r?.eqApertureMax ?? null),
-      sensorDenominatorMin: round2(r?.sensorDenominatorMin ?? null), sensorDenominatorMax: round2(r?.sensorDenominatorMax ?? null),
-      resolutionMpMin: round2(r?.resolutionMpMin ?? null), resolutionMpMax: round2(r?.resolutionMpMax ?? null),
-      fpsValues: [...new Set(fpsRows.filter((x) => x.type === t).map((x) => round2(x.fps)!))],
-    };
+    types[t] = facetOf(stats.filter((r) => r.facing === "back" && r.type === t), modes.filter((m) => m.facing === "back" && m.type === t));
   }
-  return { types };
+  return { types, front: facetOf(stats.filter((r) => r.facing === "front"), modes.filter((m) => m.facing === "front")) };
 }
