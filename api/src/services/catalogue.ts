@@ -403,7 +403,7 @@ export async function searchCatalogue(q: CatalogueQuery) {
 
 const round2 = (v: number | null) => (v === null || v === undefined ? null : Math.round(v * 100) / 100);
 
-export const VIDEO_WIDTH_THRESHOLDS = [1280, 1920, 3840, 7680] as const;
+export const VIDEO_WIDTH_THRESHOLDS = [854, 1280, 1920, 3840, 7680] as const;
 
 export type TypeFacet = {
   count: number;
@@ -412,7 +412,7 @@ export type TypeFacet = {
   sensorDenominatorMin: number | null; sensorDenominatorMax: number | null;
   resolutionMpMin: number | null; resolutionMpMax: number | null;
   fpsValues: number[];
-  /** Próg dłuższego boku ("1280", "1920", "3840", "7680") -> największy fps trybu o boku >= progu; null = brak. */
+  /** Próg dłuższego boku ("854", "1280", "1920", "3840", "7680") -> największy fps trybu o boku >= progu; null = brak. */
   videoMaxFpsByWidth: Record<string, number | null>;
 };
 
