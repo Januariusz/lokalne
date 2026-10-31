@@ -136,6 +136,7 @@ export const camera = sqliteTable("camera", {
   photoWidthPx: integer("photo_width_px"),            // maksymalne wymiary zdjęcia, dłuższy bok jako szerokość
   photoHeightPx: integer("photo_height_px"),
   aspectRatio: text("aspect_ratio", { length: 16 }),  // proporcje matrycy, np. "4:3", "1:1"
+  sensorModel: text("sensor_model", { length: 64 }),  // model matrycy, np. "Sony IMX989" (z urządzenia albo od moderatora)
   note: text("note", { length: 500 }),                // notatka moderatora o nietypowym aparacie (przypis pod specyfikacją)
   // mianownik rozmiaru matrycy wyliczany z sensorFormat ("1/1.28" -> 1.28, "1" -> 1) - do filtrowania
   sensorDenominator: real("sensor_denominator"),

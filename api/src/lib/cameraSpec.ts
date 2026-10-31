@@ -23,6 +23,7 @@ export type CameraSpec = {
   opticalZoom: boolean;
   focalLengthMaxMm: number | null;
   sensorFormat: string | null;
+  sensorModel: string | null;
   sensorDenominator: number | null;
   photoWidthPx: number | null;
   photoHeightPx: number | null;
@@ -56,6 +57,7 @@ function optText(v: unknown): { ok: true; value: string | null } | { ok: false }
 }
 
 export const MAX_VIDEO_FPS = 2000;
+export const SENSOR_MODEL_MAX = 64;
 export const MAX_VIDEO_SIDE = 16384;
 
 export type VideoModeInput = { widthPx: number; heightPx: number; fpsMax: number; note: string | null };
@@ -166,6 +168,13 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
     return bad("aspectRatio", "aspectRatio parts must be greater than 0");
   }
 
+  // Model matrycy (np. "Sony IMX989", "Samsung ISOCELL HP2"): dowolny tekst, białe znaki scalone.
+  const sm = optText(input["sensorModel"]);
+  if (!sm.ok || (sm.value !== null && sm.value.length > SENSOR_MODEL_MAX)) {
+    return bad("sensorModel", `sensorModel must be a string of at most ${SENSOR_MODEL_MAX} characters`);
+  }
+  const sensorModel = sm.value === null ? null : sm.value.replace(/\s+/g, " ");
+
   const nt = optText(input["note"]);
   if (!nt.ok || (nt.value !== null && nt.value.length > NOTE_MAX)) {
     return bad("note", `note must be a string of at most ${NOTE_MAX} characters`);
@@ -189,6 +198,7 @@ export function validateCameraSpec(input: Record<string, unknown>): { ok: true; 
       opticalZoom,
       focalLengthMaxMm,
       sensorFormat: sf.value,
+      sensorModel,
       sensorDenominator: sensorDenominatorOf(sf.value),
       photoWidthPx,
       photoHeightPx,

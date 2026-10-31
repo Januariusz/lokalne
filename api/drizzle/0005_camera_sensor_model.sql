@@ -1,0 +1,1 @@
+ALTER TABLE `camera` ADD `sensor_model` text(64);

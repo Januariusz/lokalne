@@ -17,7 +17,7 @@ const camerasRouter = new Hono<{ Variables: HonoVariables }>();
 const SPEC_KEYS = [
   "type", "facing", "focalLengthMm", "aperture", "cropFactor", "pixelPitchUm", "resolutionMp",
   "activeResolutionMp", "afZones", "ois", "variableAperture", "apertureNarrow", "opticalZoom", "focalLengthMaxMm",
-  "sensorFormat", "photoWidthPx", "photoHeightPx", "aspectRatio", "note",
+  "sensorFormat", "sensorModel", "photoWidthPx", "photoHeightPx", "aspectRatio", "note",
 ] as const;
 
 async function withSamples<T extends { id: string; variableAperture: boolean; opticalZoom: boolean }>(row: T) {
