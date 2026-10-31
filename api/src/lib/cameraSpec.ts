@@ -202,7 +202,7 @@ export function validateVideoModes(input: unknown): { ok: true; data: VideoModeI
     const w = num(o["widthPx"]), h = num(o["heightPx"]), f = num(o["fpsMax"]);
     if (w === null || !Number.isInteger(w) || w < 1 || w > 16384) return bad("videoModes.widthPx", "widthPx must be an integer between 1 and 16384");
     if (h === null || !Number.isInteger(h) || h < 1 || h > 16384) return bad("videoModes.heightPx", "heightPx must be an integer between 1 and 16384");
-    if (f === null || f < 1 || f > 1000) return bad("videoModes.fpsMax", "fpsMax must be a number between 1 and 1000");
+    if (f === null || f < 1 || f > 10000) return bad("videoModes.fpsMax", "fpsMax must be a number between 1 and 10000");
     const note = o["note"];
     if (note !== undefined && note !== null && (typeof note !== "string" || note.length > 128)) {
       return bad("videoModes.note", "note must be a string of at most 128 characters");
