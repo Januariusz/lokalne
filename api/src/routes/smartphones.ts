@@ -197,6 +197,11 @@ smartphonesRouter.get("/:id/photos", async (c) => {
       widthPx:    photo.widthPx,
       heightPx:   photo.heightPx,
       uploadDate: photo.uploadDate,
+      // parametry zdjęcia wysłane przez aplikację (plik nie ma EXIF, bo aplikacja usuwa metadane)
+      exifFocalLength:  photo.exifFocalLength,   // ogniskowa rzeczywista, mm
+      exifAperture:     photo.exifAperture,      // liczba f
+      exifIso:          photo.exifIso,
+      exifShutterSpeed: photo.exifShutterSpeed,  // czas naświetlania w sekundach (0.00137 = 1/731 s)
     })
     .from(photo)
     .innerJoin(camera, eq(photo.cameraId, camera.id))
