@@ -202,6 +202,7 @@ smartphonesRouter.get("/:id/photos", async (c) => {
       exifAperture:     photo.exifAperture,      // liczba f
       exifIso:          photo.exifIso,
       exifShutterSpeed: photo.exifShutterSpeed,  // czas naświetlania w sekundach (0.00137 = 1/731 s)
+      exifDigitalZoom:  photo.exifDigitalZoom,   // zoom cyfrowy klatki (1 = bez zoomu, 2 = wycinek 2x)
     })
     .from(photo)
     .innerJoin(camera, eq(photo.cameraId, camera.id))

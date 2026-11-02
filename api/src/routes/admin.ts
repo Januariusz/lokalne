@@ -351,7 +351,7 @@ adminRouter.patch("/media/videos/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-// Edycja metadanych zdjęcia przez moderatora (ogniskowa, przysłona, ISO, migawka, użyty aparat).
+// Edycja metadanych zdjęcia przez moderatora (ogniskowa, przysłona, ISO, migawka, zoom cyfrowy, użyty aparat).
 adminRouter.patch("/media/photos/:id/metadata", async (c) => {
   const id = c.req.param("id") as string;
   const body = await c.req.json<{
@@ -360,6 +360,7 @@ adminRouter.patch("/media/photos/:id/metadata", async (c) => {
     exifAperture?: number | null;
     exifIso?: number | null;
     exifShutterSpeed?: number | null;
+    exifDigitalZoom?: number | null;
     widthPx?: number;
     heightPx?: number;
   }>().catch(() => null);
@@ -377,6 +378,14 @@ adminRouter.patch("/media/photos/:id/metadata", async (c) => {
       return fail(c, 400, "INVALID_FIELD", `${key} must be a positive number or null`);
     }
     updates[key] = v === null || v === undefined ? null : tidyNumber(v);
+  }
+  // zoom cyfrowy: 1-100 albo null (nieznany); jak inne pola tego endpointu - błędna wartość to 400
+  if ("exifDigitalZoom" in body) {
+    const z = body.exifDigitalZoom;
+    if (z !== null && z !== undefined && !(typeof z === "number" && Number.isFinite(z) && z >= 1 && z <= 100)) {
+      return fail(c, 400, "INVALID_FIELD", "exifDigitalZoom must be a number between 1 and 100 or null", { field: "exifDigitalZoom" });
+    }
+    updates.exifDigitalZoom = z === null || z === undefined ? null : tidyNumber(z);
   }
   for (const key of ["widthPx", "heightPx"] as const) {
     if (body[key] === undefined) continue;

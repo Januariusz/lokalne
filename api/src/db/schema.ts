@@ -165,6 +165,8 @@ export const photo = sqliteTable("photo", {
   exifAperture: real("exif_aperture"),
   exifIso: integer("exif_iso"),
   exifShutterSpeed: real("exif_shutter_speed"),
+  // zoom cyfrowy zapisanej klatki względem pola widzenia aparatu: 1 = bez zoomu, 2 = wycinek 2x, null = nieznany
+  exifDigitalZoom: real("exif_digital_zoom"),
   widthPx: integer("width_px").notNull(),
   heightPx: integer("height_px").notNull(),
   uploadDate: integer("upload_date", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),

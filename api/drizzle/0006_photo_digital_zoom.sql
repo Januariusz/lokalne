@@ -1,0 +1,1 @@
+ALTER TABLE `photo` ADD `exif_digital_zoom` real;

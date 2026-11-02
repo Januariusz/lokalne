@@ -50,6 +50,12 @@ async function receive(c: Ctx, maxFileBytes: number, required: string[]) {
   }
 }
 
+/** Zoom cyfrowy zdjęcia: liczba 1-100; inna wartość (pusta, nie-liczba, poza zakresem) = nieznany (null). */
+export function optionalDigitalZoom(fields: Record<string, string>): number | null {
+  const z = optionalNumber(fields, "exifDigitalZoom");
+  return z !== null && z >= 1 && z <= 100 ? z : null;
+}
+
 function optionalNumber(fields: Record<string, string>, key: string): number | null {
   const raw = fields[key];
   if (raw === undefined || raw.trim() === "") return null;
@@ -122,6 +128,7 @@ uploadRouter.post("/photo/upload", requireAuth, photoLimit, async (c) => {
       exifAperture:     optionalNumber(upload.fields, "exifAperture"),
       exifIso:          optionalNumber(upload.fields, "exifIso"),
       exifShutterSpeed: optionalNumber(upload.fields, "exifShutterSpeed"),
+      exifDigitalZoom:  optionalDigitalZoom(upload.fields),
       widthPx,
       heightPx,
       uploadDate:       new Date(),
@@ -174,7 +181,8 @@ uploadRouter.get("/photos/mine", requireAuth, async (c) => {
     cameraType: camera.type, facing: camera.facing, status: photo.status, storageUrl: photo.storageUrl,
     widthPx: photo.widthPx, heightPx: photo.heightPx,
     exifFocalLength: photo.exifFocalLength, exifAperture: photo.exifAperture,
-    exifIso: photo.exifIso, exifShutterSpeed: photo.exifShutterSpeed, uploadDate: photo.uploadDate,
+    exifIso: photo.exifIso, exifShutterSpeed: photo.exifShutterSpeed, exifDigitalZoom: photo.exifDigitalZoom,
+    uploadDate: photo.uploadDate,
   }).from(photo).innerJoin(camera, eq(photo.cameraId, camera.id))
     .where(where).orderBy(desc(photo.uploadDate), desc(sql`${photo}.rowid`))
     .limit(limit).offset((page - 1) * limit);

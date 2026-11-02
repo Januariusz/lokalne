@@ -7,7 +7,7 @@ const CAMERA_COLS = [
   "focalLengthMm", "aperture", "cropFactor", "pixelPitchUm", "resolutionMp", "activeResolutionMp",
   "apertureNarrow", "focalLengthMaxMm", "sensorDenominator",
 ] as const;
-const PHOTO_COLS = ["exifFocalLength", "exifAperture", "exifShutterSpeed"] as const;
+const PHOTO_COLS = ["exifFocalLength", "exifAperture", "exifShutterSpeed", "exifDigitalZoom"] as const;
 
 /** Zmienione pola wiersza (tylko te, w których zaokrąglenie coś zmienia). */
 function changes<K extends string>(row: Record<K, number | null>, cols: readonly K[]): Partial<Record<K, number | null>> {
@@ -35,7 +35,7 @@ export function tidyStoredNumbers(): number {
       const ch = changes(r, ["fpsMax"] as const);
       if (ch.fpsMax !== undefined) { tx.update(cameraVideoMode).set({ fpsMax: ch.fpsMax! }).where(eq(cameraVideoMode.id, r.id)).run(); n++; }
     }
-    for (const r of tx.select({ id: photo.id, exifFocalLength: photo.exifFocalLength, exifAperture: photo.exifAperture, exifShutterSpeed: photo.exifShutterSpeed }).from(photo).all()) {
+    for (const r of tx.select({ id: photo.id, exifFocalLength: photo.exifFocalLength, exifAperture: photo.exifAperture, exifShutterSpeed: photo.exifShutterSpeed, exifDigitalZoom: photo.exifDigitalZoom }).from(photo).all()) {
       const ch = changes(r, PHOTO_COLS);
       if (Object.keys(ch).length) { tx.update(photo).set(ch).where(eq(photo.id, r.id)).run(); n++; }
     }
