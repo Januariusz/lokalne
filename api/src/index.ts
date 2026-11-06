@@ -68,7 +68,24 @@ app.route("/api/media",       mediaRouter);
 
 
 
-app.notFound((c) => fail(c, 404, "NOT_FOUND", "Not found"));
+// Adres strony (frontendu). Wejście przeglądarką na domenę API poza /api (np. po linku z maila
+// z callbackURL "/" albo "/account") przekierowuje na tę samą ścieżkę na stronie zamiast 404.
+const FRONTEND_URL = (() => {
+  const raw = (process.env["FRONTEND_URL"] ?? "https://mobilelens.me").trim().replace(/\/+$/, "");
+  return /^https?:\/\/[^/]+$/.test(raw) ? raw : null;
+})();
+
+app.notFound((c) => {
+  const path = c.req.path;
+  const isPage = (c.req.method === "GET" || c.req.method === "HEAD")
+    && !path.startsWith("/api/") && path !== "/api" && path !== "/health" && !path.startsWith("/.well-known/");
+  if (FRONTEND_URL && isPage) {
+    const query = new URL(c.req.url).search;
+    // ścieżka zawsze zaczyna się od "/", a host jest stały - nie da się przekierować na inną domenę
+    return c.redirect(`${FRONTEND_URL}${path}${query}`, 302);
+  }
+  return fail(c, 404, "NOT_FOUND", "Not found");
+});
 
 app.onError((err, c) => {
   console.error("[error]", err);
